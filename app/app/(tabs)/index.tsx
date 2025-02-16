@@ -1,4 +1,7 @@
-import { Image, StyleSheet, Platform } from 'react-native';
+import { Image, StyleSheet, Platform, Pressable } from 'react-native';
+import { Audio } from 'expo-av';
+import { useState } from 'react';
+import { analyzeAudioRecording } from '@/utils/openai';
 
 import { HelloWave } from '@/components/HelloWave';
 import ParallaxScrollView from '@/components/ParallaxScrollView';
@@ -6,6 +9,46 @@ import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 
 export default function HomeScreen() {
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [analysis, setAnalysis] = useState<string>('');
+  const [isRecording, setIsRecording] = useState(false);
+
+  async function startRecording() {
+    try {
+      await Audio.requestPermissionsAsync();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      setRecording(recording);
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Failed to start recording', err);
+    }
+  }
+
+  async function stopRecording() {
+    if (!recording) return;
+
+    try {
+      setIsRecording(false);
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      setRecording(null);
+
+      if (uri) {
+        const result = await analyzeAudioRecording(uri);
+        setAnalysis(JSON.stringify(result, null, 2));
+      }
+    } catch (err) {
+      console.error('Failed to stop recording', err);
+    }
+  }
+
   return (
     <ParallaxScrollView
       headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
@@ -50,6 +93,25 @@ export default function HomeScreen() {
           <ThemedText type="defaultSemiBold">app-example</ThemedText>.
         </ThemedText>
       </ThemedView>
+      <ThemedView style={styles.stepContainer}>
+        <ThemedText type="subtitle">Test Audio Analysis</ThemedText>
+        <Pressable
+          onPress={isRecording ? stopRecording : startRecording}
+          style={[
+            styles.recordButton,
+            { backgroundColor: isRecording ? '#ff4444' : '#44ff44' }
+          ]}>
+          <ThemedText style={styles.buttonText}>
+            {isRecording ? 'Stop Recording' : 'Start Recording'}
+          </ThemedText>
+        </Pressable>
+        {analysis ? (
+          <ThemedView style={styles.analysisContainer}>
+            <ThemedText type="subtitle">Analysis Results:</ThemedText>
+            <ThemedText style={styles.analysisText}>{analysis}</ThemedText>
+          </ThemedView>
+        ) : null}
+      </ThemedView>
     </ParallaxScrollView>
   );
 }
@@ -70,5 +132,26 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     position: 'absolute',
+  },
+  recordButton: {
+    padding: 15,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginVertical: 10,
+  },
+  buttonText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#000',
+  },
+  analysisContainer: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+  },
+  analysisText: {
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
+    fontSize: 12,
   },
 });

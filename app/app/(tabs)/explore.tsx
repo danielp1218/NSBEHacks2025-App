@@ -33,9 +33,10 @@ export default function TabTwoScreen() {
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [password, setPassword] = useState('');
   const [hasPassword, setHasPassword] = useState(false);
-  const DEFAULT_PASSWORD = 'guardian';
+  const DEFAULT_PASSWORD = 'Guardian';
   const BASE_URL = 'https://nsbe-hacks-2025-dashboard.vercel.app/api';
   // ?lastPollTime=timestampms...
+  // TODO
   const GET_INCIDENTS_ENDPOINT = `${BASE_URL}/get-new-incidents`;
   const GET_UNRESOLVED_INCIDENTS_ENDPOINT = `${BASE_URL}/get-unresolved-incidents`;
   // incidentName, victimName, incidentTime, gpsCoordinates, status, emergencyContacts:[{fullName:...,phoneNumber:...,email:...}] --------victimPhoneNumber??
@@ -66,7 +67,7 @@ export default function TabTwoScreen() {
   // Add near other state variables
   const [locationInterval, setLocationInterval] = useState<NodeJS.Timeout | null>(null);
   const [incidentId, setIncidentId] = useState<string | null>(null);
-  const LOCATION_UPDATE_INTERVAL = 2000; // 2 seconds
+  const LOCATION_UPDATE_INTERVAL = 2500; // 2.5 seconds
 
   // Initialize audio recording permissions
   useEffect(() => {
@@ -98,6 +99,25 @@ export default function TabTwoScreen() {
       await recording.stopAndUnloadAsync();
       const uri = recording.getURI();
       
+      // Send audio file to server if we have an incident ID
+      if (incidentId && uri) {
+        const formData = new FormData();
+        formData.append('incidentId', incidentId);
+        formData.append('audio', {
+          uri,
+          type: 'audio/m4a',
+          name: 'recording.m4a'
+        } as any);
+
+        await fetch(ADD_INCIDENT_AUDIO_ENDPOINT, {
+          method: 'POST',
+          body: formData,
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+        });
+      }
+
       // Reset recording for next interval
       await recording._cleanupForUnloadedRecorder();
       recording = new Audio.Recording();
@@ -128,19 +148,18 @@ export default function TabTwoScreen() {
         body: JSON.stringify({
           incidentName: 'Attack',
           victimName: fullName || 'Unknown',
-          incidentTime: new Date().getUTCMilliseconds(),
-          gpsCoordinates: {
-            latitude: location?.coords.latitude || 43.6594719,
-            longitude: location?.coords.longitude || -79.3978135,
-          },
+          incidentTime: Date.now(),
+          gpsCoordinates: `${location?.coords.latitude || 43.6594719} ${location?.coords.longitude || -79.3978135}`,
+          status: 'pending',
           emergencyContacts: emergencyContacts.map(contact => ({
             fullName: contact.name,
-            phoneNumber: contact.phoneNumbers?.[0]?.number,
-            email: contact.emails?.[0]?.email,
+            phoneNumber: contact.phoneNumbers?.[0]?.number ?? null,
+            email: contact.emails?.[0]?.email ?? null,
           })),
         }),
       });
 
+      console.log(response.status)
       const data = await response.json();
       setIncidentId(data.id); // Store the incident ID
 
@@ -159,11 +178,9 @@ export default function TabTwoScreen() {
             },
             body: JSON.stringify({
               incidentId: data.id,
-              gpsCoordinates: {
-                latitude: currentLocation.coords.latitude,
-                longitude: currentLocation.coords.longitude,
-              },
-              locationTime: new Date().getTime(),
+              // TODO
+              gpsCoordinates: `${currentLocation?.coords.latitude || 43.6594719} ${currentLocation?.coords.longitude || -79.3978135}`,
+              locationTimestamp: Date.now(),
             }),
           });
 
@@ -176,6 +193,7 @@ export default function TabTwoScreen() {
       setLocationInterval(locationTracker);
     } catch (err) {
       console.error('Failed to start incident:', err);
+      throw err;
     }
 
     // Start the recording cycle
@@ -214,7 +232,7 @@ export default function TabTwoScreen() {
           },
           body: JSON.stringify({
             id: incidentId,
-            incidentEndTime: new Date().getTime(),
+            incidentEndTime: Date.now(),
           }),
         });
         setIncidentId(null);
@@ -236,7 +254,7 @@ export default function TabTwoScreen() {
       setIsShaking(isCurrentlyShaking);
       
       // If shaking is detected, enter emergency mode
-      if (isCurrentlyShaking && !localEmergencyMode) {
+      if (isCurrentlyShaking && !localEmergencyMode && !emergencyMode) {
         console.log('Entering emergency mode');
         localEmergencyMode = true;
         setEmergencyMode(true);
@@ -330,6 +348,7 @@ export default function TabTwoScreen() {
       setEmergencyMode(false);
       setShowPasswordModal(false);
       setPassword('');
+
     } else {
       Alert.alert('Incorrect Password', 'Please try again');
     }
