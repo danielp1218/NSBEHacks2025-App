@@ -1,3 +1,6 @@
+// REPEATEDLY POLL FOR ALL OTHER INCIDENTS TO COMPARE DISTANCES TO SEE WHETHER NEED OT ALERT
+// EVERY 5S
+
 import { StyleSheet, Image, Platform, EventSubscription } from 'react-native';
 import { Audio } from 'expo-av';
 import * as Location from 'expo-location';
@@ -5,6 +8,10 @@ import { Accelerometer } from 'expo-sensors';
 import { useRef } from 'react';
 import { useEffect, useState, useCallback } from 'react';
 import { Subscription } from 'expo-sensors/build/Pedometer';
+import * as LocalAuthentication from 'expo-local-authentication';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Alert, TextInput, Modal } from 'react-native';
+import * as Contacts from 'expo-contacts';
 
 import { Collapsible } from '@/components/Collapsible';
 import { ExternalLink } from '@/components/ExternalLink';
@@ -12,7 +19,7 @@ import ParallaxScrollView from '@/components/ParallaxScrollView';
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { IconSymbol } from '@/components/ui/IconSymbol';
-import { TouchableOpacity } from 'react-native';
+import { ScrollView, TouchableOpacity } from 'react-native';
 
 let recording = new Audio.Recording();
 
@@ -23,13 +30,48 @@ export default function TabTwoScreen() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [emergencyMode, setEmergencyMode] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [password, setPassword] = useState('');
+  const [hasPassword, setHasPassword] = useState(false);
+  const DEFAULT_PASSWORD = 'guardian';
+  const BASE_URL = 'https://nsbe-hacks-2025-dashboard.vercel.app/api';
+  // ?lastPollTime=timestampms...
+  const GET_INCIDENTS_ENDPOINT = `${BASE_URL}/get-new-incidents`;
+  const GET_UNRESOLVED_INCIDENTS_ENDPOINT = `${BASE_URL}/get-unresolved-incidents`;
+  // incidentName, victimName, incidentTime, gpsCoordinates, status, emergencyContacts:[{fullName:...,phoneNumber:...,email:...}] --------victimPhoneNumber??
+  const CREATE_INCIDENT_ENDPOINT = `${BASE_URL}/create-incident`;
+  // id, incidentEndTime
+  const RESOLVE_INCIDENT_ENDPOINT = `${BASE_URL}/resolve-incident`;
+  // id, status
+  const UPDATE_INCIDENT_STATUS_ENDPOINT = `${BASE_URL}/update-incident-status`;
+  // incidentId, gpsCoordinates, locationTime
+  const ADD_INCIDENT_LOCATION_ENDPOINT = `${BASE_URL}/add-incident-location`;
+  // incidentId, audioUri, audioDuration
+  const ADD_INCIDENT_AUDIO_ENDPOINT = `${BASE_URL}/add-incident-audio`;
 
-  const _slow = () => Accelerometer.setUpdateInterval(1000);
-  const _fast = () => Accelerometer.setUpdateInterval(16);
+  // id, latitude, longitude
+
+
+  const [recordingInterval, setRecordingInterval] = useState<NodeJS.Timeout | null>(null);
+  const RECORDING_DURATION = 10000; // 10 seconds in milliseconds
+  const [hasCreatedIncident, setHasCreatedIncident] = useState<boolean>(false);
+  const [fullName, setFullName] = useState('');
+  const [emergencyContacts, setEmergencyContacts] = useState<Contacts.Contact[]>([]);
+  const [showContactsModal, setShowContactsModal] = useState(false);
+  const [contactsList, setContactsList] = useState<Contacts.Contact[]>([]);
+
+  // const _slow = () => Accelerometer.setUpdateInterval(1000);
+  // const _fast = () => Accelerometer.setUpdateInterval(16);
+
+  // Add near other state variables
+  const [locationInterval, setLocationInterval] = useState<NodeJS.Timeout | null>(null);
+  const [incidentId, setIncidentId] = useState<string | null>(null);
+  const LOCATION_UPDATE_INTERVAL = 2000; // 2 seconds
 
   // Initialize audio recording permissions
   useEffect(() => {
     (async () => {
+      Accelerometer.setUpdateInterval(350);
       await Audio.requestPermissionsAsync();
       await Location.requestForegroundPermissionsAsync();
       
@@ -41,46 +83,144 @@ export default function TabTwoScreen() {
     })();
   }, []);
 
-  // Function to start emergency recording
-  const startEmergencyRecording = async () => {
-    if (isRecording) return; // Don't start if already recording
-    
+  // Add this function before startIntervalRecording
+  const recordAndSend = async () => {
     try {
-      await recording.prepareToRecordAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
+      // Start new recording
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       await recording.startAsync();
       setIsRecording(true);
+
+      // Wait for 10 seconds
+      await new Promise(resolve => setTimeout(resolve, RECORDING_DURATION));
+
+      // Stop recording and get URI
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      
+      // Reset recording for next interval
+      await recording._cleanupForUnloadedRecorder();
+      recording = new Audio.Recording();
+      
+      // Start next recording if still in emergency mode
+      if (emergencyMode) {
+        recordAndSend();
+      } else {
+        setIsRecording(false);
+      }
     } catch (err) {
-      console.error('Failed to start recording', err);
+      console.error('Error in record and send cycle:', err);
+      setIsRecording(false);
     }
+  };
+
+  // Function to start interval recording
+  const startIntervalRecording = async () => {
+    if (isRecording) return;
+    
+    try {
+      // Send initial incident creation
+      const response = await fetch(CREATE_INCIDENT_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          incidentName: 'Attack',
+          victimName: fullName || 'Unknown',
+          incidentTime: new Date().getUTCMilliseconds(),
+          gpsCoordinates: {
+            latitude: location?.coords.latitude || 43.6594719,
+            longitude: location?.coords.longitude || -79.3978135,
+          },
+          emergencyContacts: emergencyContacts.map(contact => ({
+            fullName: contact.name,
+            phoneNumber: contact.phoneNumbers?.[0]?.number,
+            email: contact.emails?.[0]?.email,
+          })),
+        }),
+      });
+
+      const data = await response.json();
+      setIncidentId(data.id); // Store the incident ID
+
+      // Start location tracking
+      const locationTracker = setInterval(async () => {
+        try {
+          const currentLocation = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High
+          });
+
+          // Send location update
+          await fetch(ADD_INCIDENT_LOCATION_ENDPOINT, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              incidentId: data.id,
+              gpsCoordinates: {
+                latitude: currentLocation.coords.latitude,
+                longitude: currentLocation.coords.longitude,
+              },
+              locationTime: new Date().getTime(),
+            }),
+          });
+
+          setLocation(currentLocation);
+        } catch (err) {
+          console.error('Failed to update location:', err);
+        }
+      }, LOCATION_UPDATE_INTERVAL);
+
+      setLocationInterval(locationTracker);
+    } catch (err) {
+      console.error('Failed to start incident:', err);
+    }
+
+    // Start the recording cycle
+    recordAndSend();
+  };
+
+  // Function to start emergency recording
+  const startEmergencyRecording = async () => {
+    if (isRecording) return;
+    startIntervalRecording();
   };
 
   // Function to stop recording and send emergency data
   const stopEmergencyRecording = async () => {
-    if (!isRecording) return; // Don't stop if not recording
+    if (!isRecording) return;
     
     try {
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      
-      // Prepare emergency data
-      const emergencyData = {
-        timestamp: new Date().toISOString(),
-        location: {
-          latitude: location?.coords.latitude,
-          longitude: location?.coords.longitude,
-        },
-        accelerometerData: { x, y, z },
-        audioUri: uri,
-        isShaking: isShaking,
-      };
+      // Stop location tracking
+      if (locationInterval) {
+        clearInterval(locationInterval);
+        setLocationInterval(null);
+      }
 
-      console.log('Emergency Data Ready:', emergencyData);
+      // Stop recording
+      await recording.stopAndUnloadAsync();
       await recording._cleanupForUnloadedRecorder();
+      recording = new Audio.Recording();
       setIsRecording(false);
+
+      // Mark incident as resolved if we have an ID
+      if (incidentId) {
+        await fetch(RESOLVE_INCIDENT_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            id: incidentId,
+            incidentEndTime: new Date().getTime(),
+          }),
+        });
+        setIncidentId(null);
+      }
     } catch (err) {
-      console.error('Failed to stop recording', err);
+      console.error('Failed to stop recording:', err);
     }
   };
 
@@ -121,19 +261,136 @@ export default function TabTwoScreen() {
     subscription?.remove();
     setSubscription(null);
     setEmergencyMode(false);
+    setIsRecording(false);
   };
 
   useEffect(() => {
     _subscribe();
     return () => {
-      recording.stopAndUnloadAsync().finally(() => {
-        recording._cleanupForUnloadedRecorder();
-      });
+      if (isRecording) {
+        recording.stopAndUnloadAsync().finally(() => {
+          recording._cleanupForUnloadedRecorder();
+        });
+      }
+      if (locationInterval) {
+        clearInterval(locationInterval);
+      }
       subscription?.remove();
       setSubscription(null);
       setEmergencyMode(false);
+      setIsRecording(false);
+      setLocationInterval(null);
     };
   }, []);
+
+  useEffect(() => {
+    checkPassword();
+  }, []);
+
+  useEffect(() => {
+    loadUserName();
+  }, []);
+
+  useEffect(() => {
+    loadEmergencyContacts();
+  }, []);
+
+  const checkPassword = async () => {
+    const storedPassword = await AsyncStorage.getItem('emergencyPassword');
+    if (!storedPassword) {
+      // Set default password if none exists
+      await AsyncStorage.setItem('emergencyPassword', DEFAULT_PASSWORD);
+      setHasPassword(true);
+    } else {
+      setHasPassword(true);
+    }
+  };
+
+  const handleSetPassword = async () => {
+    try {
+      const auth = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Authenticate to set emergency password'
+      });
+      
+      if (auth.success) {
+        await AsyncStorage.setItem('emergencyPassword', password);
+        setHasPassword(true);
+        setShowPasswordModal(false);
+        setPassword('');
+      }
+    } catch (err) {
+      console.error('Failed to set password:', err);
+    }
+  };
+
+  const handleImOk = async (attemptedPassword: string) => {
+    const storedPassword = await AsyncStorage.getItem('emergencyPassword');
+    if (attemptedPassword === storedPassword) {
+      stopEmergencyRecording();
+      setEmergencyMode(false);
+      setShowPasswordModal(false);
+      setPassword('');
+    } else {
+      Alert.alert('Incorrect Password', 'Please try again');
+    }
+  };
+
+  const loadUserName = async () => {
+    try {
+      const storedName = await AsyncStorage.getItem('userName');
+      if (storedName) {
+        setFullName(storedName);
+      }
+    } catch (err) {
+      console.error('Failed to load user name:', err);
+    }
+  };
+
+  const handleSaveName = async (newName: string) => {
+    try {
+      await AsyncStorage.setItem('userName', newName);
+      setFullName(newName);
+    } catch (err) {
+      console.error('Failed to save user name:', err);
+    }
+  };
+
+  const loadEmergencyContacts = async () => {
+    try {
+      const storedContacts = await AsyncStorage.getItem('emergencyContacts');
+      if (storedContacts) {
+        setEmergencyContacts(JSON.parse(storedContacts));
+      }
+    } catch (err) {
+      console.error('Failed to load emergency contacts:', err);
+    }
+  };
+
+  const handlePickContact = async () => {
+    try {
+      const { status } = await Contacts.requestPermissionsAsync();
+      if (status === 'granted') {
+        const { data } = await Contacts.getContactsAsync({
+          fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Name],
+        });
+        setContactsList(data);
+        setShowContactsModal(true);
+      } else {
+        Alert.alert('Permission required', 'Please allow access to your contacts to add emergency contacts.');
+      }
+    } catch (err) {
+      console.error('Error accessing contacts:', err);
+    }
+  };
+
+  const saveEmergencyContacts = async (contacts: Contacts.Contact[]) => {
+    try {
+      await AsyncStorage.setItem('emergencyContacts', JSON.stringify(contacts));
+      setEmergencyContacts(contacts);
+    } catch (err) {
+      console.error('Failed to save emergency contacts:', err);
+    }
+  };
 
   return (
     <ParallaxScrollView
@@ -150,28 +407,137 @@ export default function TabTwoScreen() {
         <ThemedText type="title">Emergency Detection</ThemedText>
       </ThemedView>
       
+      <ThemedView style={styles.nameContainer}>
+        <ThemedText type="subtitle" style={styles.statusTitle}>Your Information</ThemedText>
+        <TextInput
+          style={styles.nameInput}
+          value={fullName}
+          onChangeText={(text) => {
+            setFullName(text);
+            handleSaveName(text);
+          }}
+          placeholder="Enter your full name"
+          placeholderTextColor="#666"
+        />
+      </ThemedView>
+
+      <ThemedView style={styles.contactsContainer}>
+        <ThemedText type="subtitle" style={styles.statusTitle}>Emergency Contacts</ThemedText>
+        
+        {emergencyContacts.map((contact, index) => (
+          <ThemedView key={index} style={styles.contactItem}>
+            <ThemedText style={styles.contactName}>
+              {contact.name}
+            </ThemedText>
+            <ThemedText style={styles.contactPhone}>
+              {contact.phoneNumbers?.[0]?.number}
+            </ThemedText>
+            <TouchableOpacity
+              onPress={() => {
+                const newContacts = emergencyContacts.filter((_, i) => i !== index);
+                saveEmergencyContacts(newContacts);
+              }}
+              style={styles.removeContactButton}>
+              <ThemedText style={styles.removeContactText}>Remove</ThemedText>
+            </TouchableOpacity>
+          </ThemedView>
+        ))}
+        
+        <TouchableOpacity
+          style={styles.addContactButton}
+          onPress={handlePickContact}>
+          <ThemedText style={styles.addContactText}>
+            Add Emergency Contact
+          </ThemedText>
+        </TouchableOpacity>
+      </ThemedView>
+
       <ThemedView style={styles.emergencyContainer}>
-        <ThemedText>oasjdijsdoisajdioasjdoisajdoij</ThemedText>
-        <ThemedText type="subtitle">Status</ThemedText>
-        <ThemedText>Emergency Mode: {emergencyMode ? '🚨 ACTIVE' : 'Inactive'}</ThemedText>
+        <ThemedText type="subtitle" style={styles.statusTitle}>Status</ThemedText>
+        <ThemedText style={styles.statusText}>
+          Emergency Mode: {emergencyMode ? '🚨 ACTIVE' : 'Inactive'}
+        </ThemedText>
         {location && (
-          <ThemedText>
+          <ThemedText style={styles.statusText}>
             Location: {location.coords.latitude.toFixed(4)}, {location.coords.longitude.toFixed(4)}
           </ThemedText>
         )}
+        
+        {emergencyMode ? (
+          // Show I'm OK button during emergency
+          <TouchableOpacity 
+            style={styles.imOkButton}
+            onPress={() => setShowPasswordModal(true)}>
+            <ThemedText style={styles.imOkButtonText}>I'm OK</ThemedText>
+          </TouchableOpacity>
+        ) : (
+          // Show password setup button when not in emergency
+          <TouchableOpacity
+            style={styles.passwordSetupButton}
+            onPress={() => setShowPasswordModal(true)}>
+            <ThemedText style={styles.passwordSetupButtonText}>
+              Change Emergency Password
+            </ThemedText>
+          </TouchableOpacity>
+        )}
+
+        {/* Password Modal */}
+        <Modal
+          visible={showPasswordModal}
+          transparent
+          animationType="slide">
+          <ThemedView style={styles.modalContainer}>
+            <ThemedView style={styles.modalContent}>
+              <ThemedText type="subtitle">
+                {emergencyMode ? 'Enter Password to Confirm' : 'Change Emergency Password'}
+              </ThemedText>
+              
+              {!emergencyMode && (
+                <ThemedText style={styles.passwordHint}>
+                  Current password: {DEFAULT_PASSWORD}
+                </ThemedText>
+              )}
+              
+              <TextInput
+                style={styles.passwordInput}
+                value={password}
+                onChangeText={setPassword}
+                placeholder={emergencyMode ? "Enter password" : "Enter new password"}
+                secureTextEntry
+              />
+              
+              <TouchableOpacity
+                style={styles.passwordButton}
+                onPress={emergencyMode ? () => handleImOk(password) : handleSetPassword}>
+                <ThemedText style={styles.buttonText}>
+                  {emergencyMode ? 'Confirm' : 'Update Password'}
+                </ThemedText>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={styles.cancelButton}
+                onPress={() => {
+                  setShowPasswordModal(false);
+                  setPassword('');
+                }}>
+                <ThemedText>Cancel</ThemedText>
+              </TouchableOpacity>
+            </ThemedView>
+          </ThemedView>
+        </Modal>
       </ThemedView>
 
-      <ThemedView style={styles.titleContainer}>
+      {/* <ThemedView style={styles.titleContainer}>
         <ThemedText type="title">Explore</ThemedText>
       </ThemedView>
-      <ThemedText>IS SHAKING: {isShaking ? 'Yes! 📱' : 'No'}</ThemedText>
+      <ThemedText>IS SHAKING: {isShaking ? 'Yes! 📱' : 'No'}</ThemedText> */}
       
-      <ThemedText>Accelerometer: (in gs where 1g = 9.81 m/s^2)</ThemedText>
+      {/* <ThemedText>Accelerometer: (in gs where 1g = 9.81 m/s^2)</ThemedText>
       <ThemedText>x: {x}</ThemedText>
       <ThemedText>y: {y}</ThemedText>
       <ThemedText>z: {z}</ThemedText>
-      <ThemedText>Shaking: {isShaking ? 'Yes! 📱' : 'No'}</ThemedText>
-      <ThemedView>
+      <ThemedText>Shaking: {isShaking ? 'Yes! 📱' : 'No'}</ThemedText> */}
+      {/* <ThemedView>
         <TouchableOpacity onPress={subscription ? _unsubscribe : _subscribe} style={styles.button}>
           <ThemedText>{subscription ? 'On' : 'Off'}</ThemedText>
         </TouchableOpacity>
@@ -181,75 +547,43 @@ export default function TabTwoScreen() {
         <TouchableOpacity onPress={_fast} style={styles.button}>
           <ThemedText>Fast</ThemedText>
         </TouchableOpacity>
-      </ThemedView>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
-        </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image source={require('@/assets/images/react-logo.png')} style={{ alignSelf: 'center' }} />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Custom fonts">
-        <ThemedText>
-          Open <ThemedText type="defaultSemiBold">app/_layout.tsx</ThemedText> to see how to load{' '}
-          <ThemedText style={{ fontFamily: 'SpaceMono' }}>
-            custom fonts such as this one.
-          </ThemedText>
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/versions/latest/sdk/font">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user's current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful <ThemedText type="defaultSemiBold">react-native-reanimated</ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
+      </ThemedView> */}
+
+      {/* Contacts Modal */}
+      <Modal
+        visible={showContactsModal}
+        transparent
+        animationType="slide">
+        <ThemedView style={styles.modalContainer}>
+          <ThemedView style={styles.modalContent}>
+            <ThemedText type="subtitle">Select Emergency Contacts</ThemedText>
+            <ScrollView style={styles.contactsList}>
+              {contactsList?.map((contact, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={styles.contactSelectItem}
+                  onPress={() => {
+                    if (emergencyContacts.length < 3) {
+                      const newContacts = [...emergencyContacts, contact];
+                      saveEmergencyContacts(newContacts);
+                      setShowContactsModal(false);
+                    } else {
+                      Alert.alert('Limit Reached', 'You can only add up to 3 emergency contacts.');
+                    }
+                  }}>
+                  <ThemedText>{contact.name}</ThemedText>
+                  <ThemedText>{contact.phoneNumbers?.[0]?.number}</ThemedText>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={() => setShowContactsModal(false)}>
+              <ThemedText>Cancel</ThemedText>
+            </TouchableOpacity>
+          </ThemedView>
+        </ThemedView>
+      </Modal>
     </ParallaxScrollView>
   );
 }
@@ -295,5 +629,153 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffebee',
     borderRadius: 8,
     marginVertical: 10,
+  },
+  imOkButton: {
+    backgroundColor: '#4CAF50',
+    padding: 15,
+    borderRadius: 8,
+    marginTop: 10,
+  },
+  imOkButtonText: {
+    color: 'white',
+    textAlign: 'center',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 8,
+    width: '80%',
+    alignItems: 'center',
+  },
+  passwordInput: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 4,
+    padding: 10,
+    width: '100%',
+    marginVertical: 10,
+  },
+  passwordButton: {
+    backgroundColor: '#2196F3',
+    padding: 10,
+    borderRadius: 4,
+    marginTop: 10,
+    width: '100%',
+    alignItems: 'center',
+  },
+  cancelButton: {
+    padding: 10,
+    marginTop: 10,
+    width: '100%',
+    alignItems: 'center',
+  },
+  passwordSetupButton: {
+    backgroundColor: '#2196F3',
+    padding: 15,
+    borderRadius: 8,
+    marginTop: 10,
+  },
+  passwordSetupButtonText: {
+    color: 'white',
+    textAlign: 'center',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  passwordHint: {
+    color: '#666',
+    marginBottom: 10,
+    fontSize: 14,
+  },
+  buttonText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  statusTitle: {
+    color: '#000000',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  statusText: {
+    color: '#000000',
+    fontSize: 16,
+    marginBottom: 4,
+  },
+  nameContainer: {
+    padding: 15,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  nameInput: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 4,
+    padding: 10,
+    fontSize: 16,
+    color: '#000000',
+    marginTop: 8,
+  },
+  contactsContainer: {
+    padding: 15,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    marginVertical: 10,
+  },
+  contactItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  contactName: {
+    flex: 1,
+    fontSize: 16,
+    color: '#000000',
+  },
+  contactPhone: {
+    fontSize: 14,
+    color: '#666',
+    marginRight: 10,
+  },
+  removeContactButton: {
+    backgroundColor: '#ff5252',
+    padding: 8,
+    borderRadius: 4,
+  },
+  removeContactText: {
+    color: 'white',
+    fontSize: 12,
+  },
+  addContactButton: {
+    backgroundColor: '#2196F3',
+    padding: 15,
+    borderRadius: 8,
+    marginTop: 10,
+  },
+  addContactText: {
+    color: 'white',
+    textAlign: 'center',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  contactsList: {
+    maxHeight: 300,
+    width: '100%',
+  },
+  contactSelectItem: {
+    padding: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
   },
 });
