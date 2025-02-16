@@ -27,6 +27,8 @@ import { ThemedView } from '@/components/ThemedView';
 import { IconSymbol } from '@/components/ui/IconSymbol';
 import { ScrollView, TouchableOpacity } from 'react-native';
 import { analyzeAudioInBackground } from '@/utils/openai';
+import * as tf from '@tensorflow/tfjs';
+import { bundleResourceIO } from '../../utils/resourceBundler';
 
 export default function TabTwoScreen() {
   const [{ x, y, z }, setData] = useState({ x: 0, y: 0, z: 0 });
@@ -106,7 +108,7 @@ export default function TabTwoScreen() {
       });
 
       // Then request permissions
-      Accelerometer.setUpdateInterval(350);
+      Accelerometer.setUpdateInterval(10);
       await Audio.requestPermissionsAsync();
       await Location.requestForegroundPermissionsAsync();
 
@@ -373,15 +375,84 @@ export default function TabTwoScreen() {
     }
   };
 
+  const [prediction, setPrediction] = useState<number>(0);
+  const [isModelLoaded, setIsModelLoaded] = useState(false);
+  const [dataPoints, setDataPoints] = useState<number[][]>([]);
+  const modelRef = useRef<tf.LayersModel | null>(null);
+  const dataPointsRef = useRef<number[][]>([]);  // New ref to track data points
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadModel = async () => {
+      try {
+        await tf.ready();
+        console.log('Loading model files');
+        const modelJson = require('../../assets/model/model.json');
+        console.log("done loading model json");
+        const weightsId = require('../../assets/model/group1-shard1of1.bin');
+        
+        const model = await tf.loadLayersModel(bundleResourceIO(modelJson, weightsId), {    
+          strict: false
+        });
+        console.log("done loading model weights");
+        modelRef.current = model;
+        if (isMounted) {
+          setIsModelLoaded(true);
+        }
+      } catch (error) {
+        console.error('Error loading model:', error);
+      }
+    };
+
+    loadModel();
+  }, []);
+
+  const processData = async () => {
+    if (!modelRef.current || dataPointsRef.current.length < 500) return;
+    
+    try {
+      // Convert data to tensor using the ref data
+      const inputTensor = tf.tensor3d([dataPointsRef.current], [1, 500, 3]);
+      
+      // Get prediction
+      const prediction = await modelRef.current.predict(inputTensor) as tf.Tensor;
+      const predictionData = await prediction.data();
+      
+      // Update UI with prediction
+      setPrediction(predictionData[0]);
+      console.log("New Prediction: ", predictionData[0]);
+      
+      // Cleanup
+      inputTensor.dispose();
+      prediction.dispose();
+    } catch (error) {
+      console.error('Error making prediction:', error);
+    }
+  };
+
   // Modify the existing accelerometer subscription to include emergency detection
   const _subscribe = () => {
     let localEmergencyMode = false; // Local tracking of emergency mode
-
+    let isCurrentlyShaking = false;
     setSubscription(Accelerometer.addListener(({ x, y, z }) => {
       setData({ x, y, z });
+      
+      // Update both state and ref
+      const newPoint = [x, y, z];
+      dataPointsRef.current = [...dataPointsRef.current, newPoint];
+      
+      // Update state for UI
+      setDataPoints(dataPointsRef.current);
 
-      const acceleration = Math.sqrt(x * x + y * y + z * z);
-      const isCurrentlyShaking = acceleration > 1.9;
+      // Process data when we have enough points
+      if (dataPointsRef.current.length >= 500) {
+        console.log("Processing new batch of data");
+        processData();
+        // Slice quarter of data off after processing to ensure fresh data next time
+        dataPointsRef.current = dataPointsRef.current.slice(125, 500);
+        isCurrentlyShaking = prediction > 0.5;
+      }
       if (isCurrentlyShaking) {
         console.log('Shaking detected');
       }
@@ -965,7 +1036,10 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 4,
     paddingTop: 50,
-    marginBottom: 100,
+    marginBottom: Platform.select({
+      android: 0,
+      default: 90,
+    }),
     // paddingBottom: 100
   },
   background: {
@@ -1104,6 +1178,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.5)',
+    ...Platform.select({
+      android: {
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
+      }
+    })
   },
   modalContent: {
     backgroundColor: 'white',
@@ -1111,6 +1194,17 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     width: '80%',
     alignItems: 'center',
+    ...Platform.select({
+      android: {
+        elevation: 5,
+      },
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.25,
+        shadowRadius: 4,
+      }
+    })
   },
   passwordInput: {
     borderWidth: 1,
