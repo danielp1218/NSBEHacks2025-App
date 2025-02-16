@@ -391,8 +391,8 @@ export default function TabTwoScreen() {
         const modelJson = require('../../assets/model/model.json');
         console.log("done loading model json");
         const weightsId = require('../../assets/model/group1-shard1of1.bin');
-        
-        const model = await tf.loadLayersModel(bundleResourceIO(modelJson, weightsId), {    
+
+        const model = await tf.loadLayersModel(bundleResourceIO(modelJson, weightsId), {
           strict: false
         });
         console.log("done loading model weights");
@@ -409,66 +409,59 @@ export default function TabTwoScreen() {
   }, []);
 
   const processData = async () => {
-    if (!modelRef.current || dataPointsRef.current.length < 500) return;
-    
+    if (!modelRef.current || dataPointsRef.current.length < 500) return false;
+
     try {
       // Convert data to tensor using the ref data
       const inputTensor = tf.tensor3d([dataPointsRef.current], [1, 500, 3]);
-      
+
       // Get prediction
       const prediction = await modelRef.current.predict(inputTensor) as tf.Tensor;
       const predictionData = await prediction.data();
-      
+
       // Update UI with prediction
       setPrediction(predictionData[0]);
+      const isShakingNow = predictionData[0] > 0.5;
+      setIsShaking(isShakingNow);
+
+      console.log("isShaking: ", isShakingNow);
       console.log("New Prediction: ", predictionData[0]);
-      
+
       // Cleanup
       inputTensor.dispose();
       prediction.dispose();
+      return isShakingNow;
     } catch (error) {
       console.error('Error making prediction:', error);
+      return false;
     }
   };
 
   // Modify the existing accelerometer subscription to include emergency detection
   const _subscribe = () => {
-    let localEmergencyMode = false; // Local tracking of emergency mode
-    let isCurrentlyShaking = false;
     setSubscription(Accelerometer.addListener(({ x, y, z }) => {
       setData({ x, y, z });
-      
+
       // Update both state and ref
       const newPoint = [x, y, z];
       dataPointsRef.current = [...dataPointsRef.current, newPoint];
-      
+
       // Update state for UI
       setDataPoints(dataPointsRef.current);
 
       // Process data when we have enough points
       if (dataPointsRef.current.length >= 500) {
         console.log("Processing new batch of data");
-        processData();
-        // Slice quarter of data off after processing to ensure fresh data next time
-        dataPointsRef.current = dataPointsRef.current.slice(125, 500);
-        isCurrentlyShaking = prediction > 0.5;
-      }
-      if (isCurrentlyShaking) {
-        console.log('Shaking detected');
-      }
-      setIsShaking(isCurrentlyShaking);
-
-      // If shaking is detected, enter emergency mode
-      if (isCurrentlyShaking && !localEmergencyMode && !emergencyMode) {
-        console.log('Entering emergency mode');
-        localEmergencyMode = true;
-        setEmergencyMode(true);
-        startEmergencyRecording();
-      } else if (!isCurrentlyShaking && localEmergencyMode) {
-        // console.log('Exiting emergency mode');
-        // localEmergencyMode = false;
-        // setEmergencyMode(false);
-        // stopEmergencyRecording();
+        processData().then(isShakingNow => {
+          // Slice quarter of data off after processing to ensure fresh data next time
+          dataPointsRef.current = dataPointsRef.current.slice(125, 500);
+          
+          if (isShakingNow && !emergencyMode) {
+            console.log('Entering emergency mode');
+            setEmergencyMode(true);
+            startEmergencyRecording();
+          }
+        });
       }
     }));
   };
@@ -552,6 +545,7 @@ export default function TabTwoScreen() {
       stopEmergencyRecording();
       setEmergencyMode(false);
       setShowPasswordModal(false);
+      setIsShaking(false);
       setPassword('');
     } else {
       Alert.alert('Incorrect Password', 'Please try again');
