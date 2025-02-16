@@ -2,7 +2,7 @@
 
 const OPENAI_API_KEY = process.env.EXPO_PUBLIC_OPENAI_API_KEY;
 const OPENAI_API_URL = 'https://api.openai.com/v1';
-const BASE_URL = 'http://172.20.10.8:3000/api';
+const BASE_URL = 'https://nsbe-hacks-2025-dashboard.vercel.app/api';
 const SET_ANALYSIS_ENDPOINT = `${BASE_URL}/set-analysis`;
 
 interface AudioAnalysis {
@@ -182,7 +182,9 @@ export async function detectEmergencySounds(audioUri: string): Promise<string[]>
 // Add a new function specifically for background analysis
 export async function analyzeAudioInBackground(audioUri: string, incidentId: string): Promise<void> {
   try {
+    console.log("Analyzing audio in background")
     const analysis = await analyzeAudioRecording(audioUri);
+    console.log("Analysis: ", analysis)
     
     // Send analysis to backend
     await fetch(SET_ANALYSIS_ENDPOINT, {
@@ -199,6 +201,7 @@ export async function analyzeAudioInBackground(audioUri: string, incidentId: str
         detectedSounds: analysis.detectedSounds
       }),
     });
+    console.log("Analysis sent to backend")
   } catch (error) {
     console.error('Error in background audio analysis:', error);
     // Don't throw error in background process

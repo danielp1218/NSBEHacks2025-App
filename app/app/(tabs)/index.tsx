@@ -1,7 +1,7 @@
 // REPEATEDLY POLL FOR ALL OTHER INCIDENTS TO COMPARE DISTANCES TO SEE WHETHER NEED OT ALERT
 // EVERY 5S
 
-import { StyleSheet, View,  } from 'react-native';
+import { Platform, StyleSheet, View, } from 'react-native';
 import { Audio } from 'expo-av';
 import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
@@ -13,11 +13,11 @@ import { Alert, TextInput, Modal } from 'react-native';
 import * as Contacts from 'expo-contacts';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
-import Animated, { 
-  useAnimatedStyle, 
+import Animated, {
+  useAnimatedStyle,
   withSpring,
   useSharedValue,
-  withRepeat 
+  withRepeat
 } from 'react-native-reanimated';
 import * as Notifications from 'expo-notifications';
 import { getDistance } from 'geolib';
@@ -61,13 +61,13 @@ export default function TabTwoScreen() {
 
 
   const [recording, setRecording] = useState<Audio.Recording>(new Audio.Recording());
-  const RECORDING_DURATION = 10000; // 10 seconds in milliseconds
+  const RECORDING_DURATION = 12000; // 12 seconds in milliseconds
   const [hasCreatedIncident, setHasCreatedIncident] = useState<boolean>(false);
   const [fullName, setFullName] = useState('');
   const [emergencyContacts, setEmergencyContacts] = useState<Contacts.Contact[]>([]);
   const [showContactsModal, setShowContactsModal] = useState(false);
   const [contactsList, setContactsList] = useState<Contacts.Contact[]>([]);
-  
+
   // const _slow = () => Accelerometer.setUpdateInterval(1000);
   // const _fast = () => Accelerometer.setUpdateInterval(16);
 
@@ -77,12 +77,12 @@ export default function TabTwoScreen() {
   const LOCATION_UPDATE_INTERVAL = 2000; // 2 seconds
 
   const pulseAnimation = useSharedValue(1);
-  
+
   useEffect(() => {
     if (emergencyMode) {
       pulseAnimation.value = withRepeat(
-        withSpring(1.2, { damping: 2, stiffness: 80 }), 
-        -1, 
+        withSpring(1.2, { damping: 2, stiffness: 80 }),
+        -1,
         true
       );
     } else {
@@ -110,70 +110,89 @@ export default function TabTwoScreen() {
       await Audio.requestPermissionsAsync();
       await Location.requestForegroundPermissionsAsync();
 
-      // Get initial location
-      const location = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High
-      });
-      setLocation(location);
+      try {
+        // Get initial location
+        const location = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Highest,
+        });
+        if (!location || !location.coords || !location.coords.latitude || !location.coords.longitude) {
+          throw new Error('Location data is missing');
+        }
+        setLocation(location);
+      } catch (error) {
+        const location = await Location.getLastKnownPositionAsync({
+          requiredAccuracy: Location.Accuracy.Highest
+        });
+        if (!location || !location.coords || !location.coords.latitude || !location.coords.longitude) {
+          try {
+            const location = await Location.getLastKnownPositionAsync({
+              requiredAccuracy: Location.Accuracy.High
+            });
+            setLocation(location);
+          } catch (error) {
+            console.error('Failed to get location:', error);
+          }
+        }
+        setLocation(location);
+      }
     })();
   }, []);
 
-  // Add this function before startIntervalRecording
+  // Update the recordAndSend function
   const recordAndSend = async (incidentId: string) => {
     try {
-      // Start new recording
-      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      await recording.startAsync();
-      setIsRecording(true);
-
-      // Wait for 10 seconds
-      await new Promise(resolve => setTimeout(resolve, RECORDING_DURATION));
-
-      // Stop recording and get URI
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      console.log(uri)
-      console.log(incidentId)
-
-      // Send audio file to server if we have an incident ID
-      if (incidentId && uri) {
-        // // Create FormData
-        // const formData = new FormData();
-        // formData.append('incidentId', incidentId);
-        // formData.append('file', {
-        //   uri: uri,
-        //   type: 'audio/m4a',
-        //   name: 'recording.m4a'
-        // } as any);
-        // try {
-        //   const response = await fetch(ADD_INCIDENT_AUDIO_ENDPOINT, {
-        //     method: 'POST',
-        //     body: formData,
-        //   });
-
-        //   if (!response.ok) {
-        //     console.error('Failed to upload audio:', await response.text());
-        //     throw new Error('Failed to upload audio');
-        //   }
-
+      // Make sure any existing recording is cleaned up
+      if (recording) {
         try {
-          // Analyze audio in background
-          analyzeAudioInBackground(uri, incidentId).catch(console.error);
+          await recording.stopAndUnloadAsync();
         } catch (error) {
-          console.error('Error uploading audio:', error);
+          // Ignore errors, just ensure cleanup
+          await recording._cleanupForUnloadedRecorder();
         }
       }
 
-      // Reset recording for next interval
-      await recording._cleanupForUnloadedRecorder();
+      // Create and set new recording
       const newRecording = new Audio.Recording();
       setRecording(newRecording);
 
-      // Start next recording if still in emergency mode
-      if (emergencyMode) {
-        recordAndSend(incidentId);
-      } else {
-        setIsRecording(false);
+      // Start new recording
+      await newRecording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await newRecording.startAsync();
+      setIsRecording(true);
+
+      // Wait for full duration
+      await new Promise(resolve => setTimeout(resolve, RECORDING_DURATION));
+
+      try {
+        try {
+          await recording.stopAndUnloadAsync();
+        } catch (error) {
+          // Ignore errors, just ensure cleanup
+          await recording._cleanupForUnloadedRecorder();
+        }
+        const uri = newRecording.getURI();
+
+        if (incidentId && uri) {
+          try {
+            await analyzeAudioInBackground(uri, incidentId);
+          } catch (error) {
+            console.error('Error analyzing audio:', error);
+          }
+        }
+
+        // Continue cycle if still in emergency mode
+        if (emergencyMode) {
+          recordAndSend(incidentId);
+        } else {
+          setIsRecording(false);
+        }
+      } catch (error) {
+        console.error('Error stopping recording:', error);
+        if (emergencyMode) {
+          recordAndSend(incidentId);
+        } else {
+          setIsRecording(false);
+        }
       }
     } catch (err) {
       console.error('Error in record and send cycle:', err);
@@ -329,6 +348,8 @@ export default function TabTwoScreen() {
       // Stop recording
       await recording.stopAndUnloadAsync();
       await recording._cleanupForUnloadedRecorder();
+      // @ts-ignore
+      setRecording(undefined);
       const newRecording = new Audio.Recording();
       setRecording(newRecording);
       setIsRecording(false);
@@ -360,7 +381,10 @@ export default function TabTwoScreen() {
       setData({ x, y, z });
 
       const acceleration = Math.sqrt(x * x + y * y + z * z);
-      const isCurrentlyShaking = acceleration > 1.5;
+      const isCurrentlyShaking = acceleration > 1.9;
+      if (isCurrentlyShaking) {
+        console.log('Shaking detected');
+      }
       setIsShaking(isCurrentlyShaking);
 
       // If shaking is detected, enter emergency mode
@@ -499,7 +523,7 @@ export default function TabTwoScreen() {
       const { status } = await Contacts.requestPermissionsAsync();
       if (status === 'granted') {
         const { data } = await Contacts.getContactsAsync({
-          fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Name],
+          fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Name, Contacts.Fields.Emails],
         });
         setContactsList(data);
         setShowContactsModal(true);
@@ -522,7 +546,7 @@ export default function TabTwoScreen() {
 
   // Add new state for alarm
   const [alarmSound, setAlarmSound] = useState<Audio.Sound | null>(null);
-  
+
   // Load alarm sound on mount
   useEffect(() => {
     // loadAlarmSound();
@@ -583,6 +607,13 @@ export default function TabTwoScreen() {
     setEmergencyMode(false);
     stopEmergencyRecording();
     // stopAlarm();
+    // Clear polling interval
+    if (pollingInterval.current) {
+      clearInterval(pollingInterval.current);
+      pollingInterval.current = undefined;
+    }
+    // Reset notification tracking
+    setLastNotificationTime({});
   };
 
   // Add new state for polling
@@ -592,7 +623,11 @@ export default function TabTwoScreen() {
 
   // Add at the top with other state
   const [notifiedIncidents, setNotifiedIncidents] = useState<Set<string>>(new Set());
-  const INCIDENT_RECENCY_THRESHOLD = 1800000; // 30 minutes in milliseconds
+  const INCIDENT_RECENCY_THRESHOLD = 10 * 60 * 1000; // 10 minutes in milliseconds
+
+  // Add at the top with other state
+  const [lastNotificationTime, setLastNotificationTime] = useState<{ [key: string]: number }>({});
+  const NOTIFICATION_COOLDOWN = 5 * 60 * 1000; // 5 minutes in milliseconds
 
   // Set up notifications on mount
   useEffect(() => {
@@ -611,7 +646,7 @@ export default function TabTwoScreen() {
 
   const setupNotifications = async () => {
     await Notifications.requestPermissionsAsync();
-    
+
     await Notifications.setNotificationHandler({
       handleNotification: async () => ({
         shouldShowAlert: true,
@@ -622,8 +657,16 @@ export default function TabTwoScreen() {
   };
 
   const sendProximityAlert = async (incident: any) => {
-    const timeAgo = Math.round((Date.now() - new Date(incident.incidentTime).getTime()) / 60000);
-    
+    // Check if we've recently sent a notification for this incident
+    const lastTime = lastNotificationTime[incident.id];
+    const now = Date.now();
+
+    if (lastTime && (now - lastTime < NOTIFICATION_COOLDOWN)) {
+      return; // Skip if notification was sent recently
+    }
+
+    const timeAgo = Math.round((now - new Date(incident.incidentTime).getTime()) / 60000);
+
     await Notifications.scheduleNotificationAsync({
       content: {
         title: "⚠️ Nearby Incident Alert",
@@ -634,9 +677,16 @@ export default function TabTwoScreen() {
       },
       trigger: null,
     });
+
+    // Update last notification time for this incident
+    setLastNotificationTime(prev => ({
+      ...prev,
+      [incident.id]: now
+    }));
   };
 
   const startIncidentPolling = () => {
+    const notifiedIncidents = new Set<string>();
     pollingInterval.current = setInterval(async () => {
       if (!location) return;
 
@@ -648,17 +698,20 @@ export default function TabTwoScreen() {
 
         // Check each incident's distance and recency
         for (const incident of incidents) {
+          // console.log(notifiedIncidents);
           // Skip if we've already notified about this incident
           if (notifiedIncidents.has(incident.id)) continue;
 
+          // console.log(incident);
           // Check if incident is recent enough
           const incidentTime = new Date(incident.incidentTime).getTime();
           const isRecent = Date.now() - incidentTime < INCIDENT_RECENCY_THRESHOLD;
-          
+
           if (!isRecent) continue;
+          // console.log('incident is recent');
 
           const [lat, lon] = incident.gpsCoordinates.split(' ').map(Number);
-          
+
           const distance = getDistance(
             { latitude: location.coords.latitude, longitude: location.coords.longitude },
             { latitude: lat, longitude: lon }
@@ -670,9 +723,10 @@ export default function TabTwoScreen() {
               ...incident,
               distance,
             });
-            
+
             // Mark this incident as notified
-            setNotifiedIncidents(prev => new Set([...prev, incident.id]));
+            // setNotifiedIncidents(prev => new Set([...prev, incident.id]));
+            notifiedIncidents.add(incident.id);
           }
         }
 
@@ -683,13 +737,23 @@ export default function TabTwoScreen() {
     }, POLL_INTERVAL);
   };
 
+  // Add new state for search
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Add search filter function
+  const filteredContacts = contactsList?.filter(contact =>
+    contact.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    contact.phoneNumbers?.[0]?.number?.includes(searchQuery) ||
+    contact.emails?.[0]?.email?.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
   return (
-    <View style={styles.container}>
+    <ScrollView style={styles.container}>
       <LinearGradient
         colors={['#1a1a1a', '#2a2a2a']}
         style={styles.background}
       />
-      
+
       {/* Status Card */}
       <BlurView intensity={20} style={styles.statusCard}>
         <View style={styles.statusHeader}>
@@ -698,7 +762,7 @@ export default function TabTwoScreen() {
             Guardian Status
           </ThemedText>
         </View>
-        
+
         <View style={styles.statusInfo}>
           <ThemedText style={styles.statusText}>
             {emergencyMode ? 'Emergency Mode Active' : 'Monitoring Active'}
@@ -725,7 +789,7 @@ export default function TabTwoScreen() {
           }}
         >
           <ThemedText style={styles.emergencyButtonText}>
-            {emergencyMode ? 'EMERGENCY ACTIVE' : 'CLICK TO ACTIVATE EMERGENCY'}
+            {emergencyMode ? 'EMERGENCY ACTIVE - CLICK IF YOU\'RE OKAY' : 'CLICK TO ACTIVATE EMERGENCY'}
           </ThemedText>
         </TouchableOpacity>
       </Animated.View>
@@ -736,7 +800,7 @@ export default function TabTwoScreen() {
           <IconSymbol name="person" size={20} color="#2196F3" />
           <ThemedText style={styles.sectionTitle}>Personal Info</ThemedText>
         </View>
-        
+
         <TextInput
           style={styles.nameInput}
           placeholder="Enter your full name"
@@ -744,6 +808,17 @@ export default function TabTwoScreen() {
           value={fullName}
           onChangeText={setFullName}
         />
+
+        <ThemedText style={styles.infoSubtext}>
+          This information will be shared with authorities in case of emergency
+        </ThemedText>
+
+        {/* Add Change Password Button */}
+        <TouchableOpacity
+          style={styles.changePasswordButton}
+          onPress={() => setShowPasswordModal(true)}>
+          <ThemedText style={styles.changePasswordText}>Change Emergency Password</ThemedText>
+        </TouchableOpacity>
       </BlurView>
 
       {/* Emergency Contacts Section */}
@@ -753,7 +828,11 @@ export default function TabTwoScreen() {
           <ThemedText style={styles.sectionTitle}>Emergency Contacts</ThemedText>
         </View>
 
-        <ScrollView style={styles.contactsList}>
+        <ThemedText style={styles.infoSubtext}>
+          These contacts will be notified immediately if an incident is detected
+        </ThemedText>
+
+        <ScrollView style={[styles.contactsList, { marginTop: 12 }]}>
           {emergencyContacts.map((contact, index) => (
             <View key={index} style={styles.contactItem}>
               <View style={styles.contactInfo}>
@@ -765,9 +844,10 @@ export default function TabTwoScreen() {
               <TouchableOpacity
                 style={styles.removeContactButton}
                 onPress={() => {
-                  setEmergencyContacts(contacts => 
+                  setEmergencyContacts(contacts =>
                     contacts.filter((_, i) => i !== index)
                   );
+                  saveEmergencyContacts(emergencyContacts.filter((_, i) => i !== index));
                 }}
               >
                 <IconSymbol name="xmark" size={16} color="#fff" />
@@ -778,7 +858,8 @@ export default function TabTwoScreen() {
 
         <TouchableOpacity
           style={styles.addContactButton}
-          onPress={() => setShowContactsModal(true)}
+          // onPress={() => setShowContactsModal(true)}
+          onPress={handlePickContact}
         >
           <ThemedText style={styles.addContactText}>Add Contact</ThemedText>
         </TouchableOpacity>
@@ -791,7 +872,7 @@ export default function TabTwoScreen() {
         animationType="slide">
         <ThemedView style={styles.modalContainer}>
           <ThemedView style={styles.modalContent}>
-            <ThemedText type="subtitle" style={{color: '#000'}}>
+            <ThemedText type="subtitle" style={{ color: '#000' }}>
               {emergencyMode ? 'Enter Password to Confirm' : 'Change Emergency Password'}
             </ThemedText>
 
@@ -823,7 +904,7 @@ export default function TabTwoScreen() {
                 setShowPasswordModal(false);
                 setPassword('');
               }}>
-              <ThemedText>Cancel</ThemedText>
+              <ThemedText style={{ color: '#000' }}>Cancel</ThemedText>
             </TouchableOpacity>
           </ThemedView>
         </ThemedView>
@@ -836,9 +917,19 @@ export default function TabTwoScreen() {
         animationType="slide">
         <ThemedView style={styles.modalContainer}>
           <ThemedView style={styles.modalContent}>
-            <ThemedText type="subtitle">Select Emergency Contacts</ThemedText>
+            <ThemedText type="subtitle" style={{ color: '#000' }}>Select Emergency Contacts</ThemedText>
+
+            {/* Add search input */}
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search contacts..."
+              placeholderTextColor="#666"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+            />
+
             <ScrollView style={styles.contactsList}>
-              {contactsList?.map((contact, index) => (
+              {filteredContacts?.map((contact, index) => (
                 <TouchableOpacity
                   key={index}
                   style={styles.contactSelectItem}
@@ -851,8 +942,9 @@ export default function TabTwoScreen() {
                       Alert.alert('Limit Reached', 'You can only add up to 3 emergency contacts.');
                     }
                   }}>
-                  <ThemedText>{contact.name}</ThemedText>
-                  <ThemedText>{contact.phoneNumbers?.[0]?.number}</ThemedText>
+                  <ThemedText style={styles.contactSelectText}>{contact.name}</ThemedText>
+                  {contact.phoneNumbers?.[0]?.number && <ThemedText style={styles.contactSelectSubtext}>{contact.phoneNumbers?.[0]?.number}</ThemedText>}
+                  {contact.emails?.[0]?.email && <ThemedText style={styles.contactSelectSubtext}>{contact.emails?.[0]?.email}</ThemedText>}
                 </TouchableOpacity>
               ))}
             </ScrollView>
@@ -864,14 +956,17 @@ export default function TabTwoScreen() {
           </ThemedView>
         </ThemedView>
       </Modal>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 16,
+    padding: 4,
+    paddingTop: 50,
+    marginBottom: 100,
+    // paddingBottom: 100
   },
   background: {
     position: 'absolute',
@@ -881,7 +976,7 @@ const styles = StyleSheet.create({
     bottom: 0,
   },
   statusCard: {
-    marginTop: 56,
+    marginTop: 36,
     borderRadius: 16,
     overflow: 'hidden',
     backgroundColor: 'rgba(255,255,255,0.05)',
@@ -893,7 +988,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   statusTitle: {
-    fontSize: 20,
+    fontSize: 25,
     fontWeight: '600',
     marginLeft: 8,
     color: '#fff',
@@ -902,12 +997,12 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   statusText: {
-    fontSize: 16,
+    fontSize: 18.5,
     color: '#fff',
     marginBottom: 4,
   },
   statusSubtext: {
-    fontSize: 14,
+    fontSize: 16,
     color: '#aaa',
   },
   emergencyButtonContainer: {
@@ -961,6 +1056,12 @@ const styles = StyleSheet.create({
     padding: 12,
     color: '#fff',
     marginTop: 12,
+  },
+  infoSubtext: {
+    color: '#aaa',
+    fontSize: 12,
+    marginTop: 8,
+    fontStyle: 'italic',
   },
   contactItem: {
     flexDirection: 'row',
@@ -1064,6 +1165,35 @@ const styles = StyleSheet.create({
     padding: 12,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(0,0,0,0.1)',
+  },
+  contactSelectText: {
     color: '#000',
+    fontSize: 16,
+    marginBottom: 4,
+  },
+  contactSelectSubtext: {
+    color: '#666',
+    fontSize: 14,
+  },
+  searchInput: {
+    width: '100%',
+    backgroundColor: '#f5f5f5',
+    borderRadius: 8,
+    padding: 12,
+    marginVertical: 12,
+    color: '#000',
+    fontSize: 16,
+  },
+  changePasswordButton: {
+    backgroundColor: '#2196F3',
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 16,
+    alignItems: 'center',
+  },
+  changePasswordText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
