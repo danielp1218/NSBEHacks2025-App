@@ -24,6 +24,7 @@ export async function analyzeAudioRecording(audioUri: string, incidentId?: strin
     // 2. Then analyze the transcription and context using GPT
     const analysis = await analyzeTranscription(transcription);
     
+    // TODO FIGURE OUT HOW TO NOT SEND THIS SO OFTEN
     // 3. If incidentId is provided, send analysis to backend
     if (incidentId) {
       try {

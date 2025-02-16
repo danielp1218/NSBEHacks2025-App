@@ -70,11 +70,20 @@ export default function TabTwoScreen() {
   // Add near other state variables
   const [locationInterval, setLocationInterval] = useState<NodeJS.Timeout | null>(null);
   const [incidentId, setIncidentId] = useState<string | null>(null);
-  const LOCATION_UPDATE_INTERVAL = 2500; // 2.5 seconds
+  const LOCATION_UPDATE_INTERVAL = 2000; // 2 seconds
 
   // Initialize audio recording permissions
   useEffect(() => {
     (async () => {
+      // Set audio mode first
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: true,
+      });
+
+      // Then request permissions
       Accelerometer.setUpdateInterval(350);
       await Audio.requestPermissionsAsync();
       await Location.requestForegroundPermissionsAsync();
