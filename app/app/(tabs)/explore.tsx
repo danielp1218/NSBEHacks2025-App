@@ -22,8 +22,6 @@ import { IconSymbol } from '@/components/ui/IconSymbol';
 import { ScrollView, TouchableOpacity } from 'react-native';
 import { analyzeAudioInBackground } from '@/utils/openai';
 
-let recording = new Audio.Recording();
-
 export default function TabTwoScreen() {
   const [{ x, y, z }, setData] = useState({ x: 0, y: 0, z: 0 });
   const [subscription, setSubscription] = useState<Subscription | null>(null);
@@ -35,7 +33,7 @@ export default function TabTwoScreen() {
   const [password, setPassword] = useState('');
   const [hasPassword, setHasPassword] = useState(false);
   const DEFAULT_PASSWORD = 'Guardian';
-  const BASE_URL = 'https://nsbe-hacks-2025-dashboard.vercel.app/api';
+  const BASE_URL = 'http://172.20.10.8:3000/api';
   // ?lastPollTime=timestampms...
   // TODO
   const GET_INCIDENTS_ENDPOINT = `${BASE_URL}/get-new-incidents`;
@@ -56,7 +54,7 @@ export default function TabTwoScreen() {
   // id, latitude, longitude
 
 
-  const [recordingInterval, setRecordingInterval] = useState<NodeJS.Timeout | null>(null);
+  const [recording, setRecording] = useState<Audio.Recording>(new Audio.Recording());
   const RECORDING_DURATION = 10000; // 10 seconds in milliseconds
   const [hasCreatedIncident, setHasCreatedIncident] = useState<boolean>(false);
   const [fullName, setFullName] = useState('');
@@ -87,7 +85,7 @@ export default function TabTwoScreen() {
       Accelerometer.setUpdateInterval(350);
       await Audio.requestPermissionsAsync();
       await Location.requestForegroundPermissionsAsync();
-      
+
       // Get initial location
       const location = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High
@@ -97,7 +95,7 @@ export default function TabTwoScreen() {
   }, []);
 
   // Add this function before startIntervalRecording
-  const recordAndSend = async () => {
+  const recordAndSend = async (incidentId: string) => {
     try {
       // Start new recording
       await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
@@ -110,36 +108,45 @@ export default function TabTwoScreen() {
       // Stop recording and get URI
       await recording.stopAndUnloadAsync();
       const uri = recording.getURI();
-      
+      console.log(uri)
+      console.log(incidentId)
+
       // Send audio file to server if we have an incident ID
       if (incidentId && uri) {
+        // Create FormData
         const formData = new FormData();
         formData.append('incidentId', incidentId);
-        formData.append('audio', {
-          uri,
+        formData.append('file', {
+          uri: uri,
           type: 'audio/m4a',
           name: 'recording.m4a'
         } as any);
+        try {
+          const response = await fetch(ADD_INCIDENT_AUDIO_ENDPOINT, {
+            method: 'POST',
+            body: formData,
+          });
 
-        await fetch(ADD_INCIDENT_AUDIO_ENDPOINT, {
-          method: 'POST',
-          body: formData,
-          headers: {
-            'Content-Type': 'multipart/form-data',
-          },
-        });
+          if (!response.ok) {
+            console.error('Failed to upload audio:', await response.text());
+            throw new Error('Failed to upload audio');
+          }
 
-        // Analyze audio in background
-        analyzeAudioInBackground(uri, incidentId).catch(console.error);
+          // Analyze audio in background
+          analyzeAudioInBackground(uri, incidentId).catch(console.error);
+        } catch (error) {
+          console.error('Error uploading audio:', error);
+        }
       }
 
       // Reset recording for next interval
       await recording._cleanupForUnloadedRecorder();
-      recording = new Audio.Recording();
-      
+      const newRecording = new Audio.Recording();
+      setRecording(newRecording);
+
       // Start next recording if still in emergency mode
       if (emergencyMode) {
-        recordAndSend();
+        recordAndSend(incidentId);
       } else {
         setIsRecording(false);
       }
@@ -152,7 +159,7 @@ export default function TabTwoScreen() {
   // Function to start interval recording
   const startIntervalRecording = async () => {
     if (isRecording) return;
-    
+
     try {
       // Send initial incident creation
       const response = await fetch(CREATE_INCIDENT_ENDPOINT, {
@@ -177,6 +184,7 @@ export default function TabTwoScreen() {
       console.log(response.status)
       const data = await response.json();
       setIncidentId(data.id); // Store the incident ID
+      console.log(data.id)
 
       // Start location tracking
       const locationTracker = setInterval(async () => {
@@ -206,13 +214,13 @@ export default function TabTwoScreen() {
       }, LOCATION_UPDATE_INTERVAL);
 
       setLocationInterval(locationTracker);
+
+      // Start the recording cycle
+      recordAndSend(data.id);
     } catch (err) {
       console.error('Failed to start incident:', err);
       throw err;
     }
-
-    // Start the recording cycle
-    recordAndSend();
   };
 
   // Function to start emergency recording
@@ -224,7 +232,7 @@ export default function TabTwoScreen() {
   // Function to stop recording and send emergency data
   const stopEmergencyRecording = async () => {
     if (!isRecording) return;
-    
+
     try {
       // Stop location tracking
       if (locationInterval) {
@@ -235,7 +243,8 @@ export default function TabTwoScreen() {
       // Stop recording
       await recording.stopAndUnloadAsync();
       await recording._cleanupForUnloadedRecorder();
-      recording = new Audio.Recording();
+      const newRecording = new Audio.Recording();
+      setRecording(newRecording);
       setIsRecording(false);
 
       // Mark incident as resolved if we have an ID
@@ -261,13 +270,13 @@ export default function TabTwoScreen() {
   const _subscribe = () => {
     let localEmergencyMode = false; // Local tracking of emergency mode
 
-    setSubscription(Accelerometer.addListener(({x, y, z}) => {
-      setData({x, y, z});
-      
+    setSubscription(Accelerometer.addListener(({ x, y, z }) => {
+      setData({ x, y, z });
+
       const acceleration = Math.sqrt(x * x + y * y + z * z);
       const isCurrentlyShaking = acceleration > 1.5;
       setIsShaking(isCurrentlyShaking);
-      
+
       // If shaking is detected, enter emergency mode
       if (isCurrentlyShaking && !localEmergencyMode && !emergencyMode) {
         console.log('Entering emergency mode');
@@ -344,7 +353,7 @@ export default function TabTwoScreen() {
       const auth = await LocalAuthentication.authenticateAsync({
         promptMessage: 'Authenticate to set emergency password'
       });
-      
+
       if (auth.success) {
         await AsyncStorage.setItem('emergencyPassword', password);
         setHasPassword(true);
@@ -440,7 +449,7 @@ export default function TabTwoScreen() {
       <ThemedView style={styles.titleContainer}>
         <ThemedText type="title">Emergency Detection</ThemedText>
       </ThemedView>
-      
+
       <ThemedView style={styles.nameContainer}>
         <ThemedText type="subtitle" style={styles.statusTitle}>Your Information</ThemedText>
         <TextInput
@@ -457,7 +466,7 @@ export default function TabTwoScreen() {
 
       <ThemedView style={styles.contactsContainer}>
         <ThemedText type="subtitle" style={styles.statusTitle}>Emergency Contacts</ThemedText>
-        
+
         {emergencyContacts.map((contact, index) => (
           <ThemedView key={index} style={styles.contactItem}>
             <ThemedText style={styles.contactName}>
@@ -476,7 +485,7 @@ export default function TabTwoScreen() {
             </TouchableOpacity>
           </ThemedView>
         ))}
-        
+
         <TouchableOpacity
           style={styles.addContactButton}
           onPress={handlePickContact}>
@@ -496,10 +505,10 @@ export default function TabTwoScreen() {
             Location: {location.coords.latitude.toFixed(4)}, {location.coords.longitude.toFixed(4)}
           </ThemedText>
         )}
-        
+
         {emergencyMode ? (
           // Show I'm OK button during emergency
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.imOkButton}
             onPress={() => setShowPasswordModal(true)}>
             <ThemedText style={styles.imOkButtonText}>I'm OK</ThemedText>
@@ -525,13 +534,13 @@ export default function TabTwoScreen() {
               <ThemedText type="subtitle">
                 {emergencyMode ? 'Enter Password to Confirm' : 'Change Emergency Password'}
               </ThemedText>
-              
+
               {!emergencyMode && (
                 <ThemedText style={styles.passwordHint}>
                   Current password: {DEFAULT_PASSWORD}
                 </ThemedText>
               )}
-              
+
               <TextInput
                 style={styles.passwordInput}
                 value={password}
@@ -539,7 +548,7 @@ export default function TabTwoScreen() {
                 placeholder={emergencyMode ? "Enter password" : "Enter new password"}
                 secureTextEntry
               />
-              
+
               <TouchableOpacity
                 style={styles.passwordButton}
                 onPress={emergencyMode ? () => handleImOk(password) : handleSetPassword}>
@@ -547,7 +556,7 @@ export default function TabTwoScreen() {
                   {emergencyMode ? 'Confirm' : 'Update Password'}
                 </ThemedText>
               </TouchableOpacity>
-              
+
               <TouchableOpacity
                 style={styles.cancelButton}
                 onPress={() => {
@@ -565,7 +574,7 @@ export default function TabTwoScreen() {
         <ThemedText type="title">Explore</ThemedText>
       </ThemedView>
       <ThemedText>IS SHAKING: {isShaking ? 'Yes! 📱' : 'No'}</ThemedText> */}
-      
+
       {/* <ThemedText>Accelerometer: (in gs where 1g = 9.81 m/s^2)</ThemedText>
       <ThemedText>x: {x}</ThemedText>
       <ThemedText>y: {y}</ThemedText>

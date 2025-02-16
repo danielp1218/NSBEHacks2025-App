@@ -37,4 +37,7 @@ yarn-error.*
 
 app-example
 
+# Environment variables
 .env
+.env.*
+!.env.example

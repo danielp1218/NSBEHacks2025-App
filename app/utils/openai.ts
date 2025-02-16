@@ -1,10 +1,8 @@
 // POTENTIALLY TAKE A PICTURE OF THE USER'S FACE AND USE IT TO DETERMINE THE SITUATION
 
-import { Audio } from 'expo-av';
-
 const OPENAI_API_KEY = process.env.EXPO_PUBLIC_OPENAI_API_KEY;
 const OPENAI_API_URL = 'https://api.openai.com/v1';
-const BASE_URL = 'https://nsbe-hacks-2025-dashboard.vercel.app/api';
+const BASE_URL = 'http://172.20.10.8:3000/api';
 const SET_ANALYSIS_ENDPOINT = `${BASE_URL}/set-analysis`;
 
 interface AudioAnalysis {
