@@ -20,6 +20,7 @@ import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { IconSymbol } from '@/components/ui/IconSymbol';
 import { ScrollView, TouchableOpacity } from 'react-native';
+import { analyzeAudioInBackground } from '@/utils/openai';
 
 let recording = new Audio.Recording();
 
@@ -49,6 +50,8 @@ export default function TabTwoScreen() {
   const ADD_INCIDENT_LOCATION_ENDPOINT = `${BASE_URL}/add-incident-location`;
   // incidentId, audioUri, audioDuration
   const ADD_INCIDENT_AUDIO_ENDPOINT = `${BASE_URL}/add-incident-audio`;
+  // incidentId, sentiment, threatLevel, situationSummary, actionRecommendations, detectedSounds
+  const SET_ANALYSIS_ENDPOINT = `${BASE_URL}/set-analysis`;
 
   // id, latitude, longitude
 
@@ -116,6 +119,9 @@ export default function TabTwoScreen() {
             'Content-Type': 'multipart/form-data',
           },
         });
+
+        // Analyze audio in background
+        analyzeAudioInBackground(uri, incidentId).catch(console.error);
       }
 
       // Reset recording for next interval

@@ -4,6 +4,8 @@ import { Audio } from 'expo-av';
 
 const OPENAI_API_KEY = process.env.EXPO_PUBLIC_OPENAI_API_KEY;
 const OPENAI_API_URL = 'https://api.openai.com/v1';
+const BASE_URL = 'https://nsbe-hacks-2025-dashboard.vercel.app/api';
+const SET_ANALYSIS_ENDPOINT = `${BASE_URL}/set-analysis`;
 
 interface AudioAnalysis {
   transcription: string;
@@ -14,13 +16,36 @@ interface AudioAnalysis {
   detectedSounds: string[];
 }
 
-export async function analyzeAudioRecording(audioUri: string): Promise<AudioAnalysis> {
+export async function analyzeAudioRecording(audioUri: string, incidentId?: string): Promise<AudioAnalysis> {
   try {
     // 1. First get the transcription using Whisper
     const transcription = await getAudioTranscription(audioUri);
     
     // 2. Then analyze the transcription and context using GPT
     const analysis = await analyzeTranscription(transcription);
+    
+    // 3. If incidentId is provided, send analysis to backend
+    if (incidentId) {
+      try {
+        await fetch(SET_ANALYSIS_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            incidentId,
+            sentiment: analysis.sentiment,
+            threatLevel: analysis.threatLevel,
+            situationSummary: analysis.situationSummary,
+            actionRecommendations: analysis.actionRecommendations,
+            detectedSounds: analysis.detectedSounds
+          }),
+        });
+      } catch (error) {
+        console.error('Error sending analysis to backend:', error);
+        // Continue execution even if backend update fails
+      }
+    }
     
     return {
       transcription: transcription,
@@ -153,4 +178,30 @@ export async function detectEmergencySounds(audioUri: string): Promise<string[]>
 
   const data = await response.json();
   return JSON.parse(data.choices[0].message.content);
+}
+
+// Add a new function specifically for background analysis
+export async function analyzeAudioInBackground(audioUri: string, incidentId: string): Promise<void> {
+  try {
+    const analysis = await analyzeAudioRecording(audioUri);
+    
+    // Send analysis to backend
+    await fetch(SET_ANALYSIS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        incidentId,
+        sentiment: analysis.sentiment,
+        threatLevel: analysis.threatLevel,
+        situationSummary: analysis.situationSummary,
+        actionRecommendations: analysis.actionRecommendations,
+        detectedSounds: analysis.detectedSounds
+      }),
+    });
+  } catch (error) {
+    console.error('Error in background audio analysis:', error);
+    // Don't throw error in background process
+  }
 }
