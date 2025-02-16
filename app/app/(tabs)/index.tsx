@@ -137,6 +137,14 @@ export default function TabTwoScreen() {
         }
         setLocation(location);
       }
+
+      await Notifications.setNotificationChannelAsync('emergency-alerts', {
+        name: 'Emergency Alerts',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#FF0000',
+        sound: require('@/assets/sounds/warning.wav'),
+      });
     })();
   }, []);
 
@@ -733,14 +741,19 @@ export default function TabTwoScreen() {
     const timeAgo = Math.round((now - new Date(incident.incidentTime).getTime()) / 60000);
 
     await Notifications.scheduleNotificationAsync({
+      identifier: incident.id,
       content: {
         title: "⚠️ Nearby Incident Alert",
         body: `An incident was reported ${incident.distance}m away ${timeAgo} minutes ago. Stay alert and avoid the area if possible.`,
         sound: require('@/assets/sounds/warning.wav'),
         priority: Notifications.AndroidNotificationPriority.HIGH,
         data: { incidentId: incident.id },
+        vibrate: [],
       },
-      trigger: null,
+      trigger: {
+        channelId: 'emergency-alerts',
+        seconds: 3,
+      }
     });
 
     // Update last notification time for this incident
