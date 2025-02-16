@@ -1,157 +1,1069 @@
-import { Image, StyleSheet, Platform, Pressable } from 'react-native';
-import { Audio } from 'expo-av';
-import { useState } from 'react';
-import { analyzeAudioRecording } from '@/utils/openai';
+// REPEATEDLY POLL FOR ALL OTHER INCIDENTS TO COMPARE DISTANCES TO SEE WHETHER NEED OT ALERT
+// EVERY 5S
 
-import { HelloWave } from '@/components/HelloWave';
-import ParallaxScrollView from '@/components/ParallaxScrollView';
+import { StyleSheet, View,  } from 'react-native';
+import { Audio } from 'expo-av';
+import * as Location from 'expo-location';
+import { Accelerometer } from 'expo-sensors';
+import { useEffect, useState, useRef } from 'react';
+import { Subscription } from 'expo-sensors/build/Pedometer';
+import * as LocalAuthentication from 'expo-local-authentication';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Alert, TextInput, Modal } from 'react-native';
+import * as Contacts from 'expo-contacts';
+import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
+import Animated, { 
+  useAnimatedStyle, 
+  withSpring,
+  useSharedValue,
+  withRepeat 
+} from 'react-native-reanimated';
+import * as Notifications from 'expo-notifications';
+import { getDistance } from 'geolib';
+
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
+import { IconSymbol } from '@/components/ui/IconSymbol';
+import { ScrollView, TouchableOpacity } from 'react-native';
+import { analyzeAudioInBackground } from '@/utils/openai';
 
-export default function HomeScreen() {
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
-  const [analysis, setAnalysis] = useState<string>('');
+export default function TabTwoScreen() {
+  const [{ x, y, z }, setData] = useState({ x: 0, y: 0, z: 0 });
+  const [subscription, setSubscription] = useState<Subscription | null>(null);
+  const [isShaking, setIsShaking] = useState(false);
+  const [location, setLocation] = useState<Location.LocationObject | null>(null);
+  const [emergencyMode, setEmergencyMode] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [password, setPassword] = useState('');
+  const [hasPassword, setHasPassword] = useState(false);
+  const DEFAULT_PASSWORD = 'Guardian';
+  const BASE_URL = 'https://nsbe-hacks-2025-dashboard.vercel.app/api';
+  // ?lastPollTime=timestampms...
+  // TODO
+  const GET_INCIDENTS_ENDPOINT = `${BASE_URL}/get-new-incidents`;
+  const GET_UNRESOLVED_INCIDENTS_ENDPOINT = `${BASE_URL}/get-unresolved-incidents`;
+  // incidentName, victimName, incidentTime, gpsCoordinates, status, emergencyContacts:[{fullName:...,phoneNumber:...,email:...}] --------victimPhoneNumber??
+  const CREATE_INCIDENT_ENDPOINT = `${BASE_URL}/create-incident`;
+  // id, incidentEndTime
+  const RESOLVE_INCIDENT_ENDPOINT = `${BASE_URL}/resolve-incident`;
+  // id, status
+  const UPDATE_INCIDENT_STATUS_ENDPOINT = `${BASE_URL}/update-incident-status`;
+  // incidentId, gpsCoordinates, locationTime
+  const ADD_INCIDENT_LOCATION_ENDPOINT = `${BASE_URL}/add-incident-location`;
+  // incidentId, audioUri, audioDuration
+  const ADD_INCIDENT_AUDIO_ENDPOINT = `${BASE_URL}/add-incident-audio`;
+  // incidentId, sentiment, threatLevel, situationSummary, actionRecommendations, detectedSounds
+  const SET_ANALYSIS_ENDPOINT = `${BASE_URL}/set-analysis`;
 
-  async function startRecording() {
-    try {
-      await Audio.requestPermissionsAsync();
+  // id, latitude, longitude
+
+
+  const [recording, setRecording] = useState<Audio.Recording>(new Audio.Recording());
+  const RECORDING_DURATION = 10000; // 10 seconds in milliseconds
+  const [hasCreatedIncident, setHasCreatedIncident] = useState<boolean>(false);
+  const [fullName, setFullName] = useState('');
+  const [emergencyContacts, setEmergencyContacts] = useState<Contacts.Contact[]>([]);
+  const [showContactsModal, setShowContactsModal] = useState(false);
+  const [contactsList, setContactsList] = useState<Contacts.Contact[]>([]);
+  
+  // const _slow = () => Accelerometer.setUpdateInterval(1000);
+  // const _fast = () => Accelerometer.setUpdateInterval(16);
+
+  // Add near other state variables
+  const [locationInterval, setLocationInterval] = useState<NodeJS.Timeout | null>(null);
+  const [incidentId, setIncidentId] = useState<string | null>(null);
+  const LOCATION_UPDATE_INTERVAL = 2000; // 2 seconds
+
+  const pulseAnimation = useSharedValue(1);
+  
+  useEffect(() => {
+    if (emergencyMode) {
+      pulseAnimation.value = withRepeat(
+        withSpring(1.2, { damping: 2, stiffness: 80 }), 
+        -1, 
+        true
+      );
+    } else {
+      pulseAnimation.value = withSpring(1);
+    }
+  }, [emergencyMode]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: pulseAnimation.value }]
+  }));
+
+  // Initialize audio recording permissions
+  useEffect(() => {
+    (async () => {
+      // Set audio mode first
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: true,
       });
 
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      setRecording(recording);
-      setIsRecording(true);
-    } catch (err) {
-      console.error('Failed to start recording', err);
-    }
-  }
+      // Then request permissions
+      Accelerometer.setUpdateInterval(350);
+      await Audio.requestPermissionsAsync();
+      await Location.requestForegroundPermissionsAsync();
 
-  async function stopRecording() {
-    if (!recording) return;
+      // Get initial location
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High
+      });
+      setLocation(location);
+    })();
+  }, []);
 
+  // Add this function before startIntervalRecording
+  const recordAndSend = async (incidentId: string) => {
     try {
-      setIsRecording(false);
+      // Start new recording
+      await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      await recording.startAsync();
+      setIsRecording(true);
+
+      // Wait for 10 seconds
+      await new Promise(resolve => setTimeout(resolve, RECORDING_DURATION));
+
+      // Stop recording and get URI
       await recording.stopAndUnloadAsync();
       const uri = recording.getURI();
-      setRecording(null);
+      console.log(uri)
+      console.log(incidentId)
 
-      if (uri) {
-        const result = await analyzeAudioRecording(uri);
-        setAnalysis(JSON.stringify(result, null, 2));
+      // Send audio file to server if we have an incident ID
+      if (incidentId && uri) {
+        // // Create FormData
+        // const formData = new FormData();
+        // formData.append('incidentId', incidentId);
+        // formData.append('file', {
+        //   uri: uri,
+        //   type: 'audio/m4a',
+        //   name: 'recording.m4a'
+        // } as any);
+        // try {
+        //   const response = await fetch(ADD_INCIDENT_AUDIO_ENDPOINT, {
+        //     method: 'POST',
+        //     body: formData,
+        //   });
+
+        //   if (!response.ok) {
+        //     console.error('Failed to upload audio:', await response.text());
+        //     throw new Error('Failed to upload audio');
+        //   }
+
+        try {
+          // Analyze audio in background
+          analyzeAudioInBackground(uri, incidentId).catch(console.error);
+        } catch (error) {
+          console.error('Error uploading audio:', error);
+        }
+      }
+
+      // Reset recording for next interval
+      await recording._cleanupForUnloadedRecorder();
+      const newRecording = new Audio.Recording();
+      setRecording(newRecording);
+
+      // Start next recording if still in emergency mode
+      if (emergencyMode) {
+        recordAndSend(incidentId);
+      } else {
+        setIsRecording(false);
       }
     } catch (err) {
-      console.error('Failed to stop recording', err);
+      console.error('Error in record and send cycle:', err);
+      setIsRecording(false);
     }
-  }
+  };
+
+  // Function to start interval recording
+  const startIntervalRecording = async () => {
+    if (isRecording) return;
+
+    try {
+      // Send initial incident creation
+      const response = await fetch(CREATE_INCIDENT_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          incidentName: 'Attack',
+          victimName: fullName || 'Unknown',
+          incidentTime: Date.now(),
+          gpsCoordinates: `${location?.coords.latitude || 43.6594719} ${location?.coords.longitude || -79.3978135}`,
+          status: 'pending',
+          emergencyContacts: emergencyContacts.map(contact => ({
+            fullName: contact.name,
+            phoneNumber: contact.phoneNumbers?.[0]?.number ?? null,
+            email: contact.emails?.[0]?.email ?? null,
+          })),
+        }),
+      });
+
+      console.log(response.status)
+      const data = await response.json();
+      setIncidentId(data.id); // Store the incident ID
+      console.log(data.id)
+
+      // Start location tracking
+      const locationTracker = setInterval(async () => {
+        try {
+          const currentLocation = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High
+          });
+
+          // Send location update
+          await fetch(ADD_INCIDENT_LOCATION_ENDPOINT, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              incidentId: data.id,
+              // TODO
+              gpsCoordinates: `${currentLocation?.coords.latitude || 43.6594719} ${currentLocation?.coords.longitude || -79.3978135}`,
+              locationTimestamp: Date.now(),
+            }),
+          });
+
+          setLocation(currentLocation);
+        } catch (err) {
+          console.error('Failed to update location:', err);
+        }
+      }, LOCATION_UPDATE_INTERVAL);
+
+      setLocationInterval(locationTracker);
+
+      // Start the recording cycle
+      recordAndSend(data.id);
+    } catch (err) {
+      console.error('Failed to start incident:', err);
+      throw err;
+    }
+  };
+
+  // Function to start emergency recording
+  const startEmergencyRecording = async () => {
+    if (isRecording) return;
+
+    try {
+      // Send initial incident creation
+      const response = await fetch(CREATE_INCIDENT_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          incidentName: 'Attack',
+          victimName: fullName || 'Unknown',
+          incidentTime: Date.now(),
+          gpsCoordinates: `${location?.coords.latitude || 43.6594719} ${location?.coords.longitude || -79.3978135}`,
+          status: 'pending',
+          emergencyContacts: emergencyContacts.map(contact => ({
+            fullName: contact.name,
+            phoneNumber: contact.phoneNumbers?.[0]?.number ?? null,
+            email: contact.emails?.[0]?.email ?? null,
+          })),
+        }),
+      });
+
+      console.log(response.status)
+      const data = await response.json();
+      setIncidentId(data.id); // Store the incident ID
+      console.log(data.id)
+
+      // Start location tracking
+      const locationTracker = setInterval(async () => {
+        try {
+          const currentLocation = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High
+          });
+
+          // Send location update
+          await fetch(ADD_INCIDENT_LOCATION_ENDPOINT, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              incidentId: data.id,
+              // TODO
+              gpsCoordinates: `${currentLocation?.coords.latitude || 43.6594719} ${currentLocation?.coords.longitude || -79.3978135}`,
+              locationTimestamp: Date.now(),
+            }),
+          });
+
+          setLocation(currentLocation);
+        } catch (err) {
+          console.error('Failed to update location:', err);
+        }
+      }, LOCATION_UPDATE_INTERVAL);
+
+      setLocationInterval(locationTracker);
+
+      // Start the recording cycle
+      recordAndSend(data.id);
+    } catch (err) {
+      console.error('Failed to start incident:', err);
+      throw err;
+    }
+  };
+
+  // Function to stop recording and send emergency data
+  const stopEmergencyRecording = async () => {
+    if (!isRecording) return;
+
+    try {
+      // Stop location tracking
+      if (locationInterval) {
+        clearInterval(locationInterval);
+        setLocationInterval(null);
+      }
+
+      // Stop recording
+      await recording.stopAndUnloadAsync();
+      await recording._cleanupForUnloadedRecorder();
+      const newRecording = new Audio.Recording();
+      setRecording(newRecording);
+      setIsRecording(false);
+
+      // Mark incident as resolved if we have an ID
+      if (incidentId) {
+        await fetch(RESOLVE_INCIDENT_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            id: incidentId,
+            incidentEndTime: Date.now(),
+          }),
+        });
+        setIncidentId(null);
+      }
+    } catch (err) {
+      console.error('Failed to stop recording:', err);
+    }
+  };
+
+  // Modify the existing accelerometer subscription to include emergency detection
+  const _subscribe = () => {
+    let localEmergencyMode = false; // Local tracking of emergency mode
+
+    setSubscription(Accelerometer.addListener(({ x, y, z }) => {
+      setData({ x, y, z });
+
+      const acceleration = Math.sqrt(x * x + y * y + z * z);
+      const isCurrentlyShaking = acceleration > 1.5;
+      setIsShaking(isCurrentlyShaking);
+
+      // If shaking is detected, enter emergency mode
+      if (isCurrentlyShaking && !localEmergencyMode && !emergencyMode) {
+        console.log('Entering emergency mode');
+        localEmergencyMode = true;
+        setEmergencyMode(true);
+        startEmergencyRecording();
+      } else if (!isCurrentlyShaking && localEmergencyMode) {
+        // console.log('Exiting emergency mode');
+        // localEmergencyMode = false;
+        // setEmergencyMode(false);
+        // stopEmergencyRecording();
+      }
+    }));
+  };
+
+  // Update the unsubscribe function
+  const _unsubscribe = async () => {
+    try {
+      await recording.stopAndUnloadAsync();
+      await recording._cleanupForUnloadedRecorder();
+    } catch (err) {
+      console.error('Failed to stop recording cleanup', err);
+    }
+    subscription?.remove();
+    setSubscription(null);
+    setEmergencyMode(false);
+    setIsRecording(false);
+  };
+
+  useEffect(() => {
+    _subscribe();
+    return () => {
+      if (isRecording) {
+        recording.stopAndUnloadAsync().finally(() => {
+          recording._cleanupForUnloadedRecorder();
+        });
+      }
+      if (locationInterval) {
+        clearInterval(locationInterval);
+      }
+      subscription?.remove();
+      setSubscription(null);
+      setEmergencyMode(false);
+      setIsRecording(false);
+      setLocationInterval(null);
+    };
+  }, []);
+
+  useEffect(() => {
+    checkPassword();
+  }, []);
+
+  useEffect(() => {
+    loadUserName();
+  }, []);
+
+  useEffect(() => {
+    loadEmergencyContacts();
+  }, []);
+
+  const checkPassword = async () => {
+    const storedPassword = await AsyncStorage.getItem('emergencyPassword');
+    if (!storedPassword) {
+      // Set default password if none exists
+      await AsyncStorage.setItem('emergencyPassword', DEFAULT_PASSWORD);
+      setHasPassword(true);
+    } else {
+      setHasPassword(true);
+    }
+  };
+
+  const handleSetPassword = async () => {
+    try {
+      const auth = await LocalAuthentication.authenticateAsync({
+        promptMessage: 'Authenticate to set emergency password'
+      });
+
+      if (auth.success) {
+        await AsyncStorage.setItem('emergencyPassword', password);
+        setHasPassword(true);
+        setShowPasswordModal(false);
+        setPassword('');
+      }
+    } catch (err) {
+      console.error('Failed to set password:', err);
+    }
+  };
+
+  const handleImOk = async (attemptedPassword: string) => {
+    const storedPassword = await AsyncStorage.getItem('emergencyPassword');
+    if (attemptedPassword === storedPassword) {
+      stopEmergencyRecording();
+      setEmergencyMode(false);
+      setShowPasswordModal(false);
+      setPassword('');
+    } else {
+      Alert.alert('Incorrect Password', 'Please try again');
+    }
+  };
+
+  const loadUserName = async () => {
+    try {
+      const storedName = await AsyncStorage.getItem('userName');
+      if (storedName) {
+        setFullName(storedName);
+      }
+    } catch (err) {
+      console.error('Failed to load user name:', err);
+    }
+  };
+
+  const handleSaveName = async (newName: string) => {
+    try {
+      await AsyncStorage.setItem('userName', newName);
+      setFullName(newName);
+    } catch (err) {
+      console.error('Failed to save user name:', err);
+    }
+  };
+
+  const loadEmergencyContacts = async () => {
+    try {
+      const storedContacts = await AsyncStorage.getItem('emergencyContacts');
+      if (storedContacts) {
+        setEmergencyContacts(JSON.parse(storedContacts));
+      }
+    } catch (err) {
+      console.error('Failed to load emergency contacts:', err);
+    }
+  };
+
+  const handlePickContact = async () => {
+    try {
+      const { status } = await Contacts.requestPermissionsAsync();
+      if (status === 'granted') {
+        const { data } = await Contacts.getContactsAsync({
+          fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Name],
+        });
+        setContactsList(data);
+        setShowContactsModal(true);
+      } else {
+        Alert.alert('Permission required', 'Please allow access to your contacts to add emergency contacts.');
+      }
+    } catch (err) {
+      console.error('Error accessing contacts:', err);
+    }
+  };
+
+  const saveEmergencyContacts = async (contacts: Contacts.Contact[]) => {
+    try {
+      await AsyncStorage.setItem('emergencyContacts', JSON.stringify(contacts));
+      setEmergencyContacts(contacts);
+    } catch (err) {
+      console.error('Failed to save emergency contacts:', err);
+    }
+  };
+
+  // Add new state for alarm
+  const [alarmSound, setAlarmSound] = useState<Audio.Sound | null>(null);
+  
+  // Load alarm sound on mount
+  useEffect(() => {
+    // loadAlarmSound();
+    // return () => {
+    //   // Cleanup sound
+    //   if (alarmSound) {
+    //     alarmSound.unloadAsync();
+    //   }
+    // };
+  }, []);
+
+  // const loadAlarmSound = async () => {
+  //   try {
+  //     const { sound } = await Audio.Sound.createAsync(
+  //       require('@/assets/sounds/alarm.mp3'),
+  //       { 
+  //         shouldPlay: false,
+  //         isLooping: true,
+  //         volume: 1.0 
+  //       }
+  //     );
+  //     setAlarmSound(sound);
+  //   } catch (error) {
+  //     console.error('Failed to load alarm sound:', error);
+  //   }
+  // };
+
+  // const playAlarm = async () => {
+  //   try {
+  //     if (alarmSound) {
+  //       await alarmSound.setPositionAsync(0);
+  //       await alarmSound.playAsync();
+  //     }
+  //   } catch (error) {
+  //     console.error('Failed to play alarm:', error);
+  //   }
+  // };
+
+  // const stopAlarm = async () => {
+  //   try {
+  //     if (alarmSound) {
+  //       await alarmSound.stopAsync();
+  //     }
+  //   } catch (error) {
+  //     console.error('Failed to stop alarm:', error);
+  //   }
+  // };
+
+  // Update emergency activation to include alarm
+  const activateEmergency = async () => {
+    setEmergencyMode(true);
+    startEmergencyRecording();
+    // playAlarm();
+  };
+
+  // Update emergency deactivation
+  const deactivateEmergency = async () => {
+    setEmergencyMode(false);
+    stopEmergencyRecording();
+    // stopAlarm();
+  };
+
+  // Add new state for polling
+  const [lastPollTime, setLastPollTime] = useState<number>(Date.now());
+  const POLL_INTERVAL = 5000; // 5 seconds
+  const ALERT_DISTANCE = 1000; // 1000 meters = 1km
+
+  // Add at the top with other state
+  const [notifiedIncidents, setNotifiedIncidents] = useState<Set<string>>(new Set());
+  const INCIDENT_RECENCY_THRESHOLD = 1800000; // 30 minutes in milliseconds
+
+  // Set up notifications on mount
+  useEffect(() => {
+    setupNotifications();
+    startIncidentPolling();
+
+    return () => {
+      // Cleanup polling interval
+      if (pollingInterval.current) {
+        clearInterval(pollingInterval.current);
+      }
+    };
+  }, []);
+
+  const pollingInterval = useRef<NodeJS.Timeout>();
+
+  const setupNotifications = async () => {
+    await Notifications.requestPermissionsAsync();
+    
+    await Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      }),
+    });
+  };
+
+  const sendProximityAlert = async (incident: any) => {
+    const timeAgo = Math.round((Date.now() - new Date(incident.incidentTime).getTime()) / 60000);
+    
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: "⚠️ Nearby Incident Alert",
+        body: `An incident was reported ${incident.distance}m away ${timeAgo} minutes ago. Stay alert and avoid the area if possible.`,
+        sound: require('@/assets/sounds/warning.wav'),
+        priority: Notifications.AndroidNotificationPriority.HIGH,
+        data: { incidentId: incident.id },
+      },
+      trigger: null,
+    });
+  };
+
+  const startIncidentPolling = () => {
+    pollingInterval.current = setInterval(async () => {
+      if (!location) return;
+
+      try {
+        const response = await fetch(
+          `${GET_INCIDENTS_ENDPOINT}?lastPollTime=${lastPollTime}`
+        );
+        const incidents = await response.json();
+
+        // Check each incident's distance and recency
+        for (const incident of incidents) {
+          // Skip if we've already notified about this incident
+          if (notifiedIncidents.has(incident.id)) continue;
+
+          // Check if incident is recent enough
+          const incidentTime = new Date(incident.incidentTime).getTime();
+          const isRecent = Date.now() - incidentTime < INCIDENT_RECENCY_THRESHOLD;
+          
+          if (!isRecent) continue;
+
+          const [lat, lon] = incident.gpsCoordinates.split(' ').map(Number);
+          
+          const distance = getDistance(
+            { latitude: location.coords.latitude, longitude: location.coords.longitude },
+            { latitude: lat, longitude: lon }
+          );
+
+          // Alert if incident is within range
+          if (distance <= ALERT_DISTANCE) {
+            await sendProximityAlert({
+              ...incident,
+              distance,
+            });
+            
+            // Mark this incident as notified
+            setNotifiedIncidents(prev => new Set([...prev, incident.id]));
+          }
+        }
+
+        setLastPollTime(Date.now());
+      } catch (error) {
+        console.error('Failed to poll for incidents:', error);
+      }
+    }, POLL_INTERVAL);
+  };
 
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12'
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-        <ThemedText>
-          Tap the Explore tab to learn more about what's included in this starter app.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          When you're ready, run{' '}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Test Audio Analysis</ThemedText>
-        <Pressable
-          onPress={isRecording ? stopRecording : startRecording}
-          style={[
-            styles.recordButton,
-            { backgroundColor: isRecording ? '#ff4444' : '#44ff44' }
-          ]}>
-          <ThemedText style={styles.buttonText}>
-            {isRecording ? 'Stop Recording' : 'Start Recording'}
+    <View style={styles.container}>
+      <LinearGradient
+        colors={['#1a1a1a', '#2a2a2a']}
+        style={styles.background}
+      />
+      
+      {/* Status Card */}
+      <BlurView intensity={20} style={styles.statusCard}>
+        <View style={styles.statusHeader}>
+          <IconSymbol name="checkmark.shield" size={24} color="#4CAF50" />
+          <ThemedText style={styles.statusTitle}>
+            Guardian Status
           </ThemedText>
-        </Pressable>
-        {analysis ? (
-          <ThemedView style={styles.analysisContainer}>
-            <ThemedText type="subtitle">Analysis Results:</ThemedText>
-            <ThemedText style={styles.analysisText}>{analysis}</ThemedText>
+        </View>
+        
+        <View style={styles.statusInfo}>
+          <ThemedText style={styles.statusText}>
+            {emergencyMode ? 'Emergency Mode Active' : 'Monitoring Active'}
+          </ThemedText>
+          <ThemedText style={styles.statusSubtext}>
+            {location ? 'Location tracking enabled' : 'Acquiring location...'}
+          </ThemedText>
+        </View>
+      </BlurView>
+
+      {/* Emergency Button */}
+      <Animated.View style={[styles.emergencyButtonContainer, animatedStyle]}>
+        <TouchableOpacity
+          style={[
+            styles.emergencyButton,
+            emergencyMode && styles.emergencyButtonActive
+          ]}
+          onPress={() => {
+            if (emergencyMode) {
+              setShowPasswordModal(true);
+            } else {
+              activateEmergency();
+            }
+          }}
+        >
+          <ThemedText style={styles.emergencyButtonText}>
+            {emergencyMode ? 'EMERGENCY ACTIVE' : 'CLICK TO ACTIVATE EMERGENCY'}
+          </ThemedText>
+        </TouchableOpacity>
+      </Animated.View>
+
+      {/* User Info Section */}
+      <BlurView intensity={15} style={styles.userInfoCard}>
+        <View style={styles.userInfoHeader}>
+          <IconSymbol name="person" size={20} color="#2196F3" />
+          <ThemedText style={styles.sectionTitle}>Personal Info</ThemedText>
+        </View>
+        
+        <TextInput
+          style={styles.nameInput}
+          placeholder="Enter your full name"
+          placeholderTextColor="#666"
+          value={fullName}
+          onChangeText={setFullName}
+        />
+      </BlurView>
+
+      {/* Emergency Contacts Section */}
+      <BlurView intensity={15} style={styles.contactsCard}>
+        <View style={styles.contactsHeader}>
+          <IconSymbol name="phone" size={20} color="#2196F3" />
+          <ThemedText style={styles.sectionTitle}>Emergency Contacts</ThemedText>
+        </View>
+
+        <ScrollView style={styles.contactsList}>
+          {emergencyContacts.map((contact, index) => (
+            <View key={index} style={styles.contactItem}>
+              <View style={styles.contactInfo}>
+                <ThemedText style={styles.contactName}>{contact.name}</ThemedText>
+                <ThemedText style={styles.contactPhone}>
+                  {contact.phoneNumbers?.[0]?.number}
+                </ThemedText>
+              </View>
+              <TouchableOpacity
+                style={styles.removeContactButton}
+                onPress={() => {
+                  setEmergencyContacts(contacts => 
+                    contacts.filter((_, i) => i !== index)
+                  );
+                }}
+              >
+                <IconSymbol name="xmark" size={16} color="#fff" />
+              </TouchableOpacity>
+            </View>
+          ))}
+        </ScrollView>
+
+        <TouchableOpacity
+          style={styles.addContactButton}
+          onPress={() => setShowContactsModal(true)}
+        >
+          <ThemedText style={styles.addContactText}>Add Contact</ThemedText>
+        </TouchableOpacity>
+      </BlurView>
+
+      {/* Password Modal */}
+      <Modal
+        visible={showPasswordModal}
+        transparent
+        animationType="slide">
+        <ThemedView style={styles.modalContainer}>
+          <ThemedView style={styles.modalContent}>
+            <ThemedText type="subtitle" style={{color: '#000'}}>
+              {emergencyMode ? 'Enter Password to Confirm' : 'Change Emergency Password'}
+            </ThemedText>
+
+            {!emergencyMode && (
+              <ThemedText style={styles.passwordHint}>
+                Current password: {DEFAULT_PASSWORD}
+              </ThemedText>
+            )}
+
+            <TextInput
+              style={styles.passwordInput}
+              value={password}
+              onChangeText={setPassword}
+              placeholder={emergencyMode ? "Enter password" : "Enter new password"}
+              secureTextEntry
+            />
+
+            <TouchableOpacity
+              style={styles.passwordButton}
+              onPress={emergencyMode ? () => handleImOk(password) : handleSetPassword}>
+              <ThemedText style={styles.buttonText}>
+                {emergencyMode ? 'Confirm' : 'Update Password'}
+              </ThemedText>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={() => {
+                setShowPasswordModal(false);
+                setPassword('');
+              }}>
+              <ThemedText>Cancel</ThemedText>
+            </TouchableOpacity>
           </ThemedView>
-        ) : null}
-      </ThemedView>
-    </ParallaxScrollView>
+        </ThemedView>
+      </Modal>
+
+      {/* Contacts Modal */}
+      <Modal
+        visible={showContactsModal}
+        transparent
+        animationType="slide">
+        <ThemedView style={styles.modalContainer}>
+          <ThemedView style={styles.modalContent}>
+            <ThemedText type="subtitle">Select Emergency Contacts</ThemedText>
+            <ScrollView style={styles.contactsList}>
+              {contactsList?.map((contact, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={styles.contactSelectItem}
+                  onPress={() => {
+                    if (emergencyContacts.length < 3) {
+                      const newContacts = [...emergencyContacts, contact];
+                      saveEmergencyContacts(newContacts);
+                      setShowContactsModal(false);
+                    } else {
+                      Alert.alert('Limit Reached', 'You can only add up to 3 emergency contacts.');
+                    }
+                  }}>
+                  <ThemedText>{contact.name}</ThemedText>
+                  <ThemedText>{contact.phoneNumbers?.[0]?.number}</ThemedText>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={() => setShowContactsModal(false)}>
+              <ThemedText style={styles.cancelButtonText}>Cancel</ThemedText>
+            </TouchableOpacity>
+          </ThemedView>
+        </ThemedView>
+      </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
+  container: {
+    flex: 1,
+    padding: 16,
+  },
+  background: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+  },
+  statusCard: {
+    marginTop: 56,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    padding: 16,
+  },
+  statusHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    marginBottom: 12,
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  statusTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    marginLeft: 8,
+    color: '#fff',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  statusInfo: {
+    marginTop: 8,
   },
-  recordButton: {
-    padding: 15,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginVertical: 10,
-  },
-  buttonText: {
+  statusText: {
     fontSize: 16,
+    color: '#fff',
+    marginBottom: 4,
+  },
+  statusSubtext: {
+    fontSize: 14,
+    color: '#aaa',
+  },
+  emergencyButtonContainer: {
+    marginVertical: 24,
+    alignItems: 'center',
+  },
+  emergencyButton: {
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    backgroundColor: '#ff4444',
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  emergencyButtonActive: {
+    backgroundColor: '#ff0000',
+  },
+  emergencyButtonText: {
+    color: '#fff',
+    fontSize: 18,
     fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  userInfoCard: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    padding: 16,
+    marginBottom: 16,
+  },
+  contactsCard: {
+    borderRadius: 26,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    padding: 16,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#fff',
+    marginLeft: 8,
+  },
+  nameInput: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    padding: 12,
+    color: '#fff',
+    marginTop: 12,
+  },
+  contactItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.1)',
+  },
+  contactInfo: {
+    flex: 1,
+  },
+  contactName: {
+    fontSize: 16,
+    color: '#fff',
+  },
+  contactPhone: {
+    fontSize: 14,
+    color: '#aaa',
+    marginTop: 4,
+  },
+  removeContactButton: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,0,0,0.3)',
+  },
+  addContactButton: {
+    backgroundColor: '#2196F3',
+    padding: 16,
+    borderRadius: 8,
+    marginTop: 16,
+    alignItems: 'center',
+  },
+  addContactText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 8,
+    width: '80%',
+    alignItems: 'center',
+  },
+  passwordInput: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 4,
+    padding: 10,
+    width: '100%',
+    marginVertical: 10,
     color: '#000',
   },
-  analysisContainer: {
-    marginTop: 10,
+  passwordButton: {
+    backgroundColor: '#2196F3',
     padding: 10,
-    borderRadius: 8,
-    backgroundColor: 'rgba(0,0,0,0.05)',
+    borderRadius: 4,
+    marginTop: 10,
+    width: '100%',
+    alignItems: 'center',
   },
-  analysisText: {
-    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
-    fontSize: 12,
+  cancelButton: {
+    padding: 10,
+    marginTop: 10,
+    width: '100%',
+    alignItems: 'center',
+  },
+  cancelButtonText: {
+    color: '#000',
+  },
+  passwordHint: {
+    color: '#666',
+    marginBottom: 10,
+    fontSize: 14,
+  },
+  buttonText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  userInfoHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  contactsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  contactsList: {
+    maxHeight: 200,
+    width: '100%',
+  },
+  contactSelectItem: {
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,0,0,0.1)',
+    color: '#000',
   },
 });
