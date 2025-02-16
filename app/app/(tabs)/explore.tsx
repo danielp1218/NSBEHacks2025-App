@@ -33,7 +33,7 @@ export default function TabTwoScreen() {
   const [password, setPassword] = useState('');
   const [hasPassword, setHasPassword] = useState(false);
   const DEFAULT_PASSWORD = 'Guardian';
-  const BASE_URL = 'http://172.20.10.8:3000/api';
+  const BASE_URL = 'https://nsbe-hacks-2025-dashboard.vercel.app/api';
   // ?lastPollTime=timestampms...
   // TODO
   const GET_INCIDENTS_ENDPOINT = `${BASE_URL}/get-new-incidents`;
@@ -113,25 +113,26 @@ export default function TabTwoScreen() {
 
       // Send audio file to server if we have an incident ID
       if (incidentId && uri) {
-        // Create FormData
-        const formData = new FormData();
-        formData.append('incidentId', incidentId);
-        formData.append('file', {
-          uri: uri,
-          type: 'audio/m4a',
-          name: 'recording.m4a'
-        } as any);
+        // // Create FormData
+        // const formData = new FormData();
+        // formData.append('incidentId', incidentId);
+        // formData.append('file', {
+        //   uri: uri,
+        //   type: 'audio/m4a',
+        //   name: 'recording.m4a'
+        // } as any);
+        // try {
+        //   const response = await fetch(ADD_INCIDENT_AUDIO_ENDPOINT, {
+        //     method: 'POST',
+        //     body: formData,
+        //   });
+
+        //   if (!response.ok) {
+        //     console.error('Failed to upload audio:', await response.text());
+        //     throw new Error('Failed to upload audio');
+        //   }
+
         try {
-          const response = await fetch(ADD_INCIDENT_AUDIO_ENDPOINT, {
-            method: 'POST',
-            body: formData,
-          });
-
-          if (!response.ok) {
-            console.error('Failed to upload audio:', await response.text());
-            throw new Error('Failed to upload audio');
-          }
-
           // Analyze audio in background
           analyzeAudioInBackground(uri, incidentId).catch(console.error);
         } catch (error) {
@@ -569,28 +570,6 @@ export default function TabTwoScreen() {
           </ThemedView>
         </Modal>
       </ThemedView>
-
-      {/* <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Explore</ThemedText>
-      </ThemedView>
-      <ThemedText>IS SHAKING: {isShaking ? 'Yes! 📱' : 'No'}</ThemedText> */}
-
-      {/* <ThemedText>Accelerometer: (in gs where 1g = 9.81 m/s^2)</ThemedText>
-      <ThemedText>x: {x}</ThemedText>
-      <ThemedText>y: {y}</ThemedText>
-      <ThemedText>z: {z}</ThemedText>
-      <ThemedText>Shaking: {isShaking ? 'Yes! 📱' : 'No'}</ThemedText> */}
-      {/* <ThemedView>
-        <TouchableOpacity onPress={subscription ? _unsubscribe : _subscribe} style={styles.button}>
-          <ThemedText>{subscription ? 'On' : 'Off'}</ThemedText>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={_slow} style={[styles.button, styles.middleButton]}>
-          <ThemedText>Slow</ThemedText>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={_fast} style={styles.button}>
-          <ThemedText>Fast</ThemedText>
-        </TouchableOpacity>
-      </ThemedView> */}
 
       {/* Contacts Modal */}
       <Modal
